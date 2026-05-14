@@ -1,0 +1,46 @@
+server:
+  port: 8100
+
+spring:
+  application:
+    name: mall-gateway
+  main:
+    web-application-type: reactive
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+    gateway:
+      routes:
+        - id: auth-route
+          uri: lb://mall-auth
+          predicates:
+            - Path=/api/auth/**
+        - id: product-route
+          uri: lb://mall-product
+          predicates:
+            - Path=/api/product/**
+        - id: cart-route
+          uri: lb://mall-cart
+          predicates:
+            - Path=/api/cart/**
+        - id: order-route
+          uri: lb://mall-order
+          predicates:
+            - Path=/api/order/**
+        - id: seckill-route
+          uri: lb://mall-seckill
+          predicates:
+            - Path=/api/seckill/**
+    sentinel:
+      transport:
+        dashboard: localhost:8858
+      eager: true
+      scg:
+        fallback:
+          mode: response
+          response-status: 200
+          response-body: '{"code":429,"message":"Too many requests","data":null}'
+mall:
+  auth:
+    secret: mall-demo-secret

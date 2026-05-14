@@ -1,0 +1,84 @@
+services:
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: mall-nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  mysql:
+    image: mysql:8.0
+    container_name: mall-mysql
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: mall
+      TZ: Asia/Shanghai
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d
+
+  redis:
+    image: redis:7
+    container_name: mall-redis
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: mall-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: mall
+      RABBITMQ_DEFAULT_PASS: mall
+
+  nacos:
+    image: nacos/nacos-server:v2.3.2
+    container_name: mall-nacos
+    environment:
+      MODE: standalone
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+      - "9849:9849"
+
+  sentinel:
+    image: bladex/sentinel-dashboard:1.8.8
+    container_name: mall-sentinel
+    ports:
+      - "8858:8858"
+
+  seata:
+    image: seataio/seata-server:2.0.0
+    container_name: mall-seata
+    ports:
+      - "8091:8091"
+      - "7091:7091"
+    environment:
+      SEATA_PORT: 8091
+      STORE_MODE: file
+
+  canal:
+    image: canal/canal-server:v1.1.7
+    container_name: mall-canal
+    depends_on:
+      - mysql
+    environment:
+      canal.instance.master.address: mysql:3306
+      canal.instance.dbUsername: canal
+      canal.instance.dbPassword: canal
+      canal.instance.connectionCharset: UTF-8
+      canal.instance.tsdb.enable: "false"
+      canal.instance.gtidon: "false"
+    ports:
+      - "12111:11111"

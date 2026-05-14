@@ -1,0 +1,58 @@
+server:
+  port: 8102
+
+spring:
+  application:
+    name: mall-product
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+    openfeign:
+      client:
+        config:
+          default:
+            connect-timeout: 200
+            read-timeout: 250
+    alibaba:
+      seata:
+        tx-service-group: mall_tx_group
+  datasource:
+    url: jdbc:mysql://localhost:3307/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 500ms
+
+mall:
+  canal:
+    enabled: true
+    host: localhost
+    port: 12111
+    destination: example
+    subscribe: 'mall\.(sku|sku_stock|spu|brand|category)'
+    batch-size: 100
+    idle-sleep-millis: 1000
+    retry-sleep-millis: 5000
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+
+seata:
+  application-id: mall-product
+  tx-service-group: mall_tx_group
+  enable-auto-data-source-proxy: false
+  registry:
+    type: file
+  config:
+    type: file
+  service:
+    vgroup-mapping:
+      mall_tx_group: default
+    grouplist:
+      default: localhost:8091

@@ -1,0 +1,14 @@
+server:
+  port: 8101
+
+spring:
+  application:
+    name: mall-auth
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+
+mall:
+  auth:
+    secret: mall-demo-secret

@@ -1,0 +1,87 @@
+package com.mall.order.service.impl;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mall.common.util.JsonUtils;
+import com.mall.message.MessageNames;
+import com.mall.message.ReliableMessageRepository;
+import com.mall.message.ReliableMessagePublisher;
+import com.mall.message.SeckillOrderResultMessage;
+import com.mall.order.pojo.dto.SeckillOrderRequest;
+import com.mall.order.pojo.entity.OrderInfo;
+import com.mall.order.service.OrderService;
+import com.rabbitmq.client.Channel;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+
+@Component
+public class OrderMessageListener {
+
+    private final OrderService orderService;
+    private final ObjectMapper objectMapper;
+    private final ReliableMessagePublisher messagePublisher;
+    private final ReliableMessageRepository messageRepository;
+
+    public OrderMessageListener(OrderService orderService,
+                                ObjectMapper objectMapper,
+                                ReliableMessagePublisher messagePublisher,
+                                ReliableMessageRepository messageRepository) {
+        this.orderService = orderService;
+        this.objectMapper = objectMapper;
+        this.messagePublisher = messagePublisher;
+        this.messageRepository = messageRepository;
+    }
+
+    @RabbitListener(queues = MessageNames.ORDER_CLOSE_QUEUE)
+    public void onOrderClose(String orderSn, Message message, Channel channel) throws IOException {
+        long deliveryTag = message.getMessageProperties().getDeliveryTag();
+        try {
+            orderService.closeIfCreated(orderSn);
+            markConsumed(message);
+            channel.basicAck(deliveryTag, false);
+        } catch (Exception exception) {
+            channel.basicNack(deliveryTag, false, false);
+        }
+    }
+
+    @RabbitListener(queues = MessageNames.SECKILL_ORDER_CREATE_QUEUE)
+    public void onSeckillOrderCreate(String payload, Message message, Channel channel) throws IOException {
+        long deliveryTag = message.getMessageProperties().getDeliveryTag();
+        SeckillOrderRequest request = null;
+        try {
+            request = objectMapper.readValue(payload, SeckillOrderRequest.class);
+            OrderInfo order = orderService.createSeckillOrder(request);
+            publishSeckillResult(SeckillOrderResultMessage.success(request.requestId(), order.orderSn()));
+            markConsumed(message);
+            channel.basicAck(deliveryTag, false);
+        } catch (Exception exception) {
+            if (request != null) {
+                publishSeckillResult(SeckillOrderResultMessage.failed(request.requestId(), exception.getMessage()));
+            }
+            channel.basicNack(deliveryTag, false, false);
+        }
+    }
+
+    @RabbitListener(queues = {
+            MessageNames.ORDER_CLOSE_DLQ,
+            MessageNames.SECKILL_ORDER_CREATE_DLQ,
+            MessageNames.SECKILL_ORDER_RESULT_DLQ
+    })
+    public void onDeadLetter(String payload, Message message, Channel channel) throws IOException {
+        channel.basicAck(message.getMessageProperties().getDeliveryTag(), false);
+    }
+
+    private void publishSeckillResult(SeckillOrderResultMessage resultMessage) {
+        String payload = JsonUtils.toJson(objectMapper, resultMessage);
+        messagePublisher.publishSeckillOrderResult(resultMessage.requestId(), payload);
+    }
+
+    private void markConsumed(Message message) {
+        String messageId = message.getMessageProperties().getMessageId();
+        if (messageId != null) {
+            messageRepository.markConsumed(messageId);
+        }
+    }
+}

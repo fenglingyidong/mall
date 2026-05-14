@@ -1,0 +1,69 @@
+server:
+  port: 8104
+
+spring:
+  application:
+    name: mall-order
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+    openfeign:
+      client:
+        config:
+          default:
+            connect-timeout: 1000
+            read-timeout: 3000
+    sentinel:
+      transport:
+        dashboard: localhost:8858
+      eager: true
+    alibaba:
+      seata:
+        tx-service-group: mall_tx_group
+  datasource:
+    url: jdbc:mysql://localhost:3307/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: mall
+    password: mall
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    listener:
+      simple:
+        acknowledge-mode: manual
+        default-requeue-rejected: false
+
+mall:
+  order:
+    close-delay-seconds: 30
+  message:
+    compensation:
+      enabled: true
+      fixed-delay: 60000
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+
+feign:
+  sentinel:
+    enabled: true
+
+seata:
+  application-id: mall-order
+  tx-service-group: mall_tx_group
+  enable-auto-data-source-proxy: false
+  registry:
+    type: file
+  config:
+    type: file
+  service:
+    vgroup-mapping:
+      mall_tx_group: default
+    grouplist:
+      default: localhost:8091

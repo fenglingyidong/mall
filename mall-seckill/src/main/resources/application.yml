@@ -1,0 +1,43 @@
+server:
+  port: 8105
+
+spring:
+  application:
+    name: mall-seckill
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+    sentinel:
+      transport:
+        dashboard: localhost:8858
+      eager: true
+  datasource:
+    url: jdbc:mysql://localhost:3307/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: mall
+    password: mall
+    publisher-confirm-type: correlated
+    publisher-returns: true
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 500ms
+
+mall:
+  seckill:
+    permits-per-second: 100
+    lock:
+      enabled: true
+      wait-millis: 100
+      lease-millis: 3000
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
