@@ -11,6 +11,7 @@ import com.mall.product.service.ProductService;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -29,19 +30,14 @@ public class CanalProductCacheInvalidationListener {
 
     private static final Logger log = LoggerFactory.getLogger(CanalProductCacheInvalidationListener.class);
 
-    private final CanalProperties properties;
-    private final ProductRepository repository;
-    private final ProductService productService;
+    @Autowired
+    private CanalProperties properties;
+    @Autowired
+    private ProductRepository repository;
+    @Autowired
+    private ProductService productService;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private Thread worker;
-
-    public CanalProductCacheInvalidationListener(CanalProperties properties,
-                                                 ProductRepository repository,
-                                                 ProductService productService) {
-        this.properties = properties;
-        this.repository = repository;
-        this.productService = productService;
-    }
 
     @EventListener(ApplicationReadyEvent.class)
     public void start() {

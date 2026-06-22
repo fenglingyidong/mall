@@ -30,7 +30,7 @@ services:
     image: redis:7
     container_name: mall-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
 
   rabbitmq:
     image: rabbitmq:3-management
@@ -59,7 +59,7 @@ services:
       - "8858:8858"
 
   seata:
-    image: seataio/seata-server:2.0.0
+    image: seataio/seata-server
     container_name: mall-seata
     ports:
       - "8091:8091"

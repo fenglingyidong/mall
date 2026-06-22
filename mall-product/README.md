@@ -18,6 +18,7 @@
 ## 核心功能
 
 - 查询商品详情：商品主体、同 SPU SKU 选项、评价摘要、可领取优惠券。
+- 按关键词、类目、品牌和价格区间搜索 SKU 级商品候选，供外部导购 Agent 或搜索页召回商品。
 - 查询分类树。
 - 提供内部商品详情接口给订单服务。
 - 提供库存扣减和库存释放接口。
@@ -32,6 +33,7 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| `GET` | `/api/product/search` | 搜索 SKU 级商品候选，支持 `keyword`、`categoryId`、`brand`、`minPrice`、`maxPrice`、`limit` |
 | `GET` | `/api/product/{skuId}` | 查询商品详情 |
 | `GET` | `/api/product/category/tree` | 查询分类树 |
 

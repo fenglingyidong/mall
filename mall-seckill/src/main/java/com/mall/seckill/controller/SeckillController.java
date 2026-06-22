@@ -5,6 +5,7 @@ import com.mall.seckill.pojo.vo.SeckillActivityView;
 import com.mall.seckill.pojo.vo.SeckillResult;
 import com.mall.seckill.pojo.vo.SeckillSubmitResponse;
 import com.mall.seckill.service.SeckillService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -15,11 +16,8 @@ import java.util.List;
 @RestController
 public class SeckillController {
 
-    private final SeckillService seckillService;
-
-    public SeckillController(SeckillService seckillService) {
-        this.seckillService = seckillService;
-    }
+    @Autowired
+    private SeckillService seckillService;
 
     @GetMapping("/api/seckill/activities")
     public ApiResponse<List<SeckillActivityView>> activities() {

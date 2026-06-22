@@ -1,13 +1,18 @@
 package com.mall.auth.controller;
 
 import com.mall.auth.pojo.dto.LoginRequest;
+import com.mall.auth.pojo.entity.AuthUser;
 import com.mall.auth.pojo.vo.LoginResponse;
 import com.mall.auth.pojo.vo.TokenPayload;
+import com.mall.auth.repository.AuthUserRepository;
 import com.mall.auth.service.SimpleTokenService;
 import com.mall.common.api.ApiResponse;
 import com.mall.common.context.UserContext;
 import com.mall.common.context.UserInfo;
+import com.mall.common.exception.BusinessException;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -19,17 +24,29 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/auth")
 public class AuthController {
 
-    private final SimpleTokenService tokenService;
+    @Autowired
+    private SimpleTokenService tokenService;
 
-    public AuthController(SimpleTokenService tokenService) {
+    @Autowired
+    private AuthUserRepository userRepository;
+
+    public AuthController() {
+    }
+
+    public AuthController(SimpleTokenService tokenService, AuthUserRepository userRepository) {
         this.tokenService = tokenService;
+        this.userRepository = userRepository;
     }
 
     @PostMapping("/login")
     public ApiResponse<LoginResponse> login(@Valid @RequestBody LoginRequest request) {
-        Long userId = Math.abs((long) request.username().hashCode());
-        String token = tokenService.create(userId, request.username());
-        return ApiResponse.success(new LoginResponse(userId, request.username(), token));
+        AuthUser user = userRepository.findByUsername(request.username().trim())
+                .orElseThrow(() -> new BusinessException(401, "Invalid username or password"));
+        if (!passwordMatches(request.password(), user.password())) {
+            throw new BusinessException(401, "Invalid username or password");
+        }
+        String token = tokenService.create(user.id(), user.username());
+        return ApiResponse.success(new LoginResponse(user.id(), user.username(), token));
     }
 
     @GetMapping("/me")
@@ -41,5 +58,11 @@ public class AuthController {
     public ApiResponse<TokenPayload> verify(@RequestHeader("Authorization") String authorization) {
         String token = authorization.replace("Bearer ", "");
         return ApiResponse.success(tokenService.verify(token));
+    }
+
+    private boolean passwordMatches(String rawPassword, String storedPassword) {
+        return StringUtils.hasText(rawPassword)
+                && StringUtils.hasText(storedPassword)
+                && rawPassword.equals(storedPassword);
     }
 }

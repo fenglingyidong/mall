@@ -14,6 +14,7 @@ import com.mall.product.pojo.vo.CategoryNode;
 import com.mall.product.pojo.vo.CouponView;
 import com.mall.product.pojo.vo.ProductCoreDetail;
 import com.mall.product.pojo.vo.ProductDetail;
+import com.mall.product.pojo.vo.ProductSearchItem;
 import com.mall.product.pojo.vo.ReviewSummary;
 import com.mall.product.service.ProductService;
 import com.mall.product.service.StockTccAction;
@@ -22,6 +23,7 @@ import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -72,6 +74,23 @@ public class ProductServiceImpl implements ProductService {
         CompletableFuture<List<CouponView>> couponFuture = couponFuture(skuId, UserContext.currentUserIdOrDefault(1L));
         ProductCoreDetail coreDetail = coreDetail(skuId);
         return toDetail(coreDetail, reviewFuture.join(), couponFuture.join());
+    }
+
+    @Override
+    public List<ProductSearchItem> search(String keyword,
+                                          Long categoryId,
+                                          String brand,
+                                          BigDecimal minPrice,
+                                          BigDecimal maxPrice,
+                                          Integer limit) {
+        int safeLimit = limit == null ? 10 : Math.max(1, Math.min(limit, 50));
+        return repository.search(keyword, categoryId, brand, minPrice, maxPrice, safeLimit);
+    }
+
+    @Override
+    public List<ProductSearchItem> searchByName(String name, Integer limit) {
+        int safeLimit = limit == null ? 10 : Math.max(1, Math.min(limit, 50));
+        return repository.searchByName(name, safeLimit);
     }
 
     private ProductCoreDetail coreDetail(Long skuId) {

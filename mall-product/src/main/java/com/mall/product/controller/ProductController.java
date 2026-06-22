@@ -4,28 +4,45 @@ import com.mall.common.api.ApiResponse;
 import com.mall.product.pojo.dto.StockDeductRequest;
 import com.mall.product.pojo.vo.CategoryNode;
 import com.mall.product.pojo.vo.ProductDetail;
+import com.mall.product.pojo.vo.ProductSearchItem;
 import com.mall.product.service.ProductService;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 @RestController
 public class ProductController {
 
-    private final ProductService productService;
-
-    public ProductController(ProductService productService) {
-        this.productService = productService;
-    }
+    @Autowired
+    private ProductService productService;
 
     @GetMapping("/api/product/{skuId}")
     public ApiResponse<ProductDetail> detail(@PathVariable Long skuId) {
         return ApiResponse.success(productService.detail(skuId));
+    }
+
+    @GetMapping("/api/product/search")
+    public ApiResponse<List<ProductSearchItem>> search(@RequestParam(value = "keyword", required = false) String keyword,
+                                                       @RequestParam(value = "categoryId", required = false) Long categoryId,
+                                                       @RequestParam(value = "brand", required = false) String brand,
+                                                       @RequestParam(value = "minPrice", required = false) BigDecimal minPrice,
+                                                       @RequestParam(value = "maxPrice", required = false) BigDecimal maxPrice,
+                                                       @RequestParam(value = "limit", required = false) Integer limit) {
+        return ApiResponse.success(productService.search(keyword, categoryId, brand, minPrice, maxPrice, limit));
+    }
+
+    @GetMapping("/internal/product/search/name")
+    public List<ProductSearchItem> searchByName(@RequestParam("name") String name,
+                                                @RequestParam(value = "limit", required = false) Integer limit) {
+        return productService.searchByName(name, limit);
     }
 
     @GetMapping("/api/product/category/tree")

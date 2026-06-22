@@ -8,6 +8,10 @@ export function getProduct(skuId) {
   return http.get(`/api/product/${skuId}`)
 }
 
+export function searchProducts(params = {}) {
+  return http.get('/api/product/search', { params })
+}
+
 export function getCategoryTree() {
   return http.get('/api/product/category/tree')
 }

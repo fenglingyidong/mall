@@ -10,6 +10,7 @@ import com.mall.order.pojo.dto.SeckillOrderRequest;
 import com.mall.order.pojo.entity.OrderInfo;
 import com.mall.order.service.OrderService;
 import com.rabbitmq.client.Channel;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
@@ -19,20 +20,14 @@ import java.io.IOException;
 @Component
 public class OrderMessageListener {
 
-    private final OrderService orderService;
-    private final ObjectMapper objectMapper;
-    private final ReliableMessagePublisher messagePublisher;
-    private final ReliableMessageRepository messageRepository;
-
-    public OrderMessageListener(OrderService orderService,
-                                ObjectMapper objectMapper,
-                                ReliableMessagePublisher messagePublisher,
-                                ReliableMessageRepository messageRepository) {
-        this.orderService = orderService;
-        this.objectMapper = objectMapper;
-        this.messagePublisher = messagePublisher;
-        this.messageRepository = messageRepository;
-    }
+    @Autowired
+    private OrderService orderService;
+    @Autowired
+    private ObjectMapper objectMapper;
+    @Autowired
+    private ReliableMessagePublisher messagePublisher;
+    @Autowired
+    private ReliableMessageRepository messageRepository;
 
     @RabbitListener(queues = MessageNames.ORDER_CLOSE_QUEUE)
     public void onOrderClose(String orderSn, Message message, Channel channel) throws IOException {

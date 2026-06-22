@@ -7,6 +7,7 @@ import com.mall.order.pojo.entity.OrderInfo;
 import com.mall.order.pojo.vo.ConfirmOrderResponse;
 import com.mall.order.service.OrderService;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -16,11 +17,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class OrderController {
 
-    private final OrderService orderService;
-
-    public OrderController(OrderService orderService) {
-        this.orderService = orderService;
-    }
+    @Autowired
+    private OrderService orderService;
 
     @PostMapping("/api/order/confirm")
     public ApiResponse<ConfirmOrderResponse> confirm() {

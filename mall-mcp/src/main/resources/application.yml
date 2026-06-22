@@ -1,0 +1,24 @@
+server:
+  port: ${MALL_MCP_PORT:8120}
+
+spring:
+  application:
+    name: mall-mcp
+  ai:
+    mcp:
+      server:
+        name: mall-mcp-server
+        version: 1.0.0
+        type: SYNC
+        protocol: STREAMABLE
+        annotation-scanner:
+          enabled: true
+        streamable-http:
+          mcp-endpoint: /mcp
+
+mall:
+  mcp:
+    mall-base-url: ${MALL_BASE_URL:http://localhost:8100}
+    context-ttl: 30m
+    confirmation-ttl: 5m
+    request-timeout: 10s

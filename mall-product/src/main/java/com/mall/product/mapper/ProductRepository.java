@@ -6,10 +6,12 @@ import com.mall.product.pojo.dto.StockDeductRequest;
 import com.mall.product.pojo.entity.ProductDetailRow;
 import com.mall.product.pojo.entity.SkuEntity;
 import com.mall.product.pojo.entity.SpuEntity;
+import com.mall.product.pojo.vo.ProductSearchItem;
 import com.mall.product.pojo.vo.SkuOption;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 @Repository
@@ -82,6 +84,43 @@ public class ProductRepository {
                         .eq(SpuEntity::getCategoryId, categoryId))
                 .stream()
                 .flatMap(spu -> skuIdsBySpu(spu.getId()).stream())
+                .toList();
+    }
+
+    public List<ProductSearchItem> search(String keyword,
+                                          Long categoryId,
+                                          String brand,
+                                          BigDecimal minPrice,
+                                          BigDecimal maxPrice,
+                                          int limit) {
+        return skuMapper.selectSearch(keyword, categoryId, brand, minPrice, maxPrice, limit)
+                .stream()
+                .map(row -> new ProductSearchItem(
+                        row.getSkuId(),
+                        row.getSpuId(),
+                        row.getSkuName(),
+                        row.getSpuName(),
+                        row.getBrandName(),
+                        row.getCategoryName(),
+                        row.getPrice(),
+                        row.getStock()
+                ))
+                .toList();
+    }
+
+    public List<ProductSearchItem> searchByName(String name, int limit) {
+        return skuMapper.selectSearchByName(name, limit)
+                .stream()
+                .map(row -> new ProductSearchItem(
+                        row.getSkuId(),
+                        row.getSpuId(),
+                        row.getSkuName(),
+                        row.getSpuName(),
+                        row.getBrandName(),
+                        row.getCategoryName(),
+                        row.getPrice(),
+                        row.getStock()
+                ))
                 .toList();
     }
 

@@ -29,6 +29,7 @@
         <module>mall-order</module>
         <module>mall-seckill</module>
         <module>mall-gateway</module>
+        <module>mall-mcp</module>
     </modules>
 
     <properties>
@@ -37,6 +38,7 @@
         <maven.compiler.release>17</maven.compiler.release>
         <spring-cloud.version>2024.0.2</spring-cloud.version>
         <spring-cloud-alibaba.version>2023.0.3.4</spring-cloud-alibaba.version>
+        <spring-ai.version>1.1.4</spring-ai.version>
         <canal.version>1.1.7</canal.version>
         <ttl.version>2.14.5</ttl.version>
         <redisson.version>3.27.2</redisson.version>
@@ -55,6 +57,13 @@
                 <groupId>com.alibaba.cloud</groupId>
                 <artifactId>spring-cloud-alibaba-dependencies</artifactId>
                 <version>${spring-cloud-alibaba.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
