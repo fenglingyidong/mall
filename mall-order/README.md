@@ -1,6 +1,6 @@
 # mall-order 订单服务
 
-`mall-order` 负责普通订单确认、创建、支付、取消、超时关单，以及秒杀订单的异步创建。普通下单链路使用 Seata TCC 协调商品库存预留，订单创建后通过 RabbitMQ 延迟消息完成超时关单。
+`mall-order` 负责普通订单确认、创建、支付、取消、超时关单，以及秒杀订单的异步创建。普通下单链路使用 Seata TCC 协调商品库存预留，订单创建后通过 RabbitMQ 延迟消息完成超时关单；秒杀订单的库存已经由 `mall-seckill` 预扣，订单侧不再二次扣商品库存。
 
 更多整体背景见 [../README.md](../README.md) 和 [../docs/architecture.md](../docs/architecture.md)。
 
@@ -20,9 +20,9 @@
 - 根据购物车已勾选商品确认订单金额。
 - 创建普通订单：查询购物车、查询商品详情、TCC 预留库存、保存订单、清空购物车、发送延迟关单消息。
 - 支付订单：`CREATED -> PAID`。
-- 取消订单：`CREATED -> CANCELED`，并释放库存。
+- 取消订单：`CREATED -> CANCELED`，普通订单释放商品库存，秒杀订单不释放商品库存。
 - 超时关单：消费延迟关单消息，只关闭仍为 `CREATED` 的订单。
-- 创建秒杀订单：消费秒杀下单消息，做消费幂等和一人一单校验，成功后发送秒杀结果消息。
+- 创建秒杀订单：消费秒杀下单消息，做消费幂等和一人一单校验，不再二次扣商品库存，成功后发送秒杀结果消息。
 
 ## 接口
 
@@ -53,7 +53,7 @@
   - `/internal/product/stock/deduct`
   - `/internal/product/stock/release`
 
-普通订单创建时，`@GlobalTransactional` 开启 Seata 全局事务；调用商品库存扣减接口时处于全局事务内，商品服务执行 TCC Try/Confirm/Cancel。
+普通订单创建时，`@GlobalTransactional` 开启 Seata 全局事务；调用商品库存扣减接口时处于全局事务内，商品服务执行 TCC Try/Confirm/Cancel。秒杀订单创建只落订单数据，库存结果由 `mall-seckill` 的扣减快照确认或回补。
 
 ## 消息
 

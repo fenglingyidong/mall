@@ -6,3 +6,7 @@ target/
 .DS_Store
 frontend/node_modules/
 frontend/dist/
+docs/jmeter/
+docs/superpowers/
+inventory_hotspot_seckill_architecture_markdown/
+.codex/

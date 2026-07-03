@@ -102,7 +102,7 @@ public class OrderServiceImpl implements OrderService {
     @Override
     public OrderInfo cancel(String orderSn) {
         OrderInfo updated = repository.transition(orderSn, OrderStatus.CREATED, OrderStatus.CANCELED);
-        if (updated.status() == OrderStatus.CANCELED) {
+        if (updated.status() == OrderStatus.CANCELED && shouldReleaseProductStock(updated)) {
             releaseStock(updated);
         }
         return updated;
@@ -117,7 +117,7 @@ public class OrderServiceImpl implements OrderService {
     public OrderInfo closeIfCreated(String orderSn) {
         OrderInfo before = repository.require(orderSn);
         OrderInfo updated = repository.transition(orderSn, OrderStatus.CREATED, OrderStatus.CLOSED);
-        if (before.status() == OrderStatus.CREATED && updated.status() == OrderStatus.CLOSED) {
+        if (before.status() == OrderStatus.CREATED && updated.status() == OrderStatus.CLOSED && shouldReleaseProductStock(updated)) {
             releaseStock(updated);
         }
         return updated;
@@ -137,9 +137,6 @@ public class OrderServiceImpl implements OrderService {
                     request.quantity(),
                     request.price().multiply(BigDecimal.valueOf(request.quantity()))
             ));
-            requireSuccess(productClient.deduct(items.stream()
-                    .map(item -> new StockDeductRequest.Item(item.skuId(), item.quantity()))
-                    .toList()), "Stock deduct");
             OrderInfo order = new OrderInfo(
                     OrderNoGenerator.next("S"),
                     request.userId(),
@@ -166,6 +163,10 @@ public class OrderServiceImpl implements OrderService {
                 .map(item -> new StockDeductRequest.Item(item.skuId(), item.quantity()))
                 .toList();
         requireSuccess(productClient.release(items), "Stock release");
+    }
+
+    private boolean shouldReleaseProductStock(OrderInfo order) {
+        return !"SECKILL".equals(order.source());
     }
 
     private void requireSuccess(ApiResponse<Void> response, String operation) {

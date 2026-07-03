@@ -32,16 +32,20 @@ Client
   -> Spring Cloud Gateway
   -> Gateway 通过 Nacos + lb://mall-seckill 路由到秒杀服务
   -> Seckill 使用 Sentinel 对 seckill-submit 资源限流
-  -> Redisson 对同一用户同一活动 SKU 加短租约提交锁
-  -> Redis Lua 原子判断库存和重复购买
+  -> Redisson 对同一用户同一活动 SKU 加提交锁，默认 watchdog 自动续约
+  -> TairString 读取 stock/version，已售罄时快速失败
+  -> 交易型数据库条件扣减 seckill_sku.stock 并递增 version
+  -> 写入 seckill_stock_snapshot(DEDUCTED)
   -> Seckill 写入 seckill_result(PROCESSING)
+  -> Seckill 按数据库 version 刷新 TairString 库存缓存
   -> mall-message 写入 mq_message 后发布秒杀下单消息
   -> mall.seckill.order.create.queue
-  -> Order 手动 ACK 消费消息并创建秒杀订单
+  -> Order 手动 ACK 消费消息并创建秒杀订单，不再二次扣商品库存
   -> Order 写入 order_info/order_item/seckill_order
   -> Order 发布秒杀结果消息
   -> mall.seckill.order.result.queue
-  -> Seckill 手动 ACK 消费结果消息，更新 seckill_result 查询状态
+  -> Seckill 手动 ACK 消费结果消息，确认快照或回补 seckill_sku.stock/version
+  -> Seckill 刷新 TairString 库存缓存并更新 seckill_result 查询状态
   -> consume_record 消费幂等 + seckill_order(activity_id,user_id) 唯一约束防重复下单
 ```
 
@@ -56,7 +60,7 @@ Client
 - `mall-product` 使用 OpenFeign 调用 `mall-review` 的评价摘要接口和 `mall-coupon` 的可领取优惠券接口，并用 `CompletableFuture` 并行聚合非核心展示信息；商品详情异步线程池通过 `TtlExecutors` 包装，避免异步任务丢失用户上下文。
 - `mall-order` 使用 OpenFeign 调用 `mall-product` 的商品详情、库存扣减、库存释放接口，以及 `mall-cart` 的选中购物车查询和清理接口；普通订单创建用 Seata TCC 协调商品库存 Try/Confirm/Cancel。
 - `mall-order` 的 Feign 客户端保留 fallback；商品详情可降级演示，库存扣减/释放降级为失败，避免商品服务不可用时误创建订单。
-- `mall-seckill` 使用 Sentinel `SphU.entry("seckill-submit")` 和 `FlowRuleManager` 配置 QPS 规则，超过阈值返回业务码 `429`；同一用户重复秒杀提交由 Redisson 短租约锁保护。
+- `mall-seckill` 使用 Sentinel `SphU.entry("seckill-submit")` 和 `FlowRuleManager` 配置 QPS 规则，超过阈值返回业务码 `429`；同一用户重复秒杀提交由 Redisson 锁保护，默认使用 watchdog 自动续约；TairString 只承担版本化库存读缓存，库存事实由交易型数据库事务扣减。
 - Gateway 与订单、秒杀服务均配置 Sentinel Dashboard 地址 `localhost:8858`，便于后续在控制台观察资源和规则。
 
 ## 数据持久化
@@ -68,7 +72,7 @@ Client
 - `mall-coupon`：商品优惠券落到 `product_coupon`。
 - `mall-cart`：购物车数据落到 `cart_item`，Redis Hash `cart:{userId}` 只作为缓存层。
 - `mall-order`：订单主表、订单明细、秒杀订单绑定关系分别落到 `order_info`、`order_item`、`seckill_order`。
-- `mall-seckill`：秒杀活动、秒杀商品、异步查询结果分别落到 `seckill_activity`、`seckill_sku`、`seckill_result`。
+- `mall-seckill`：秒杀活动、秒杀商品、扣减快照、异步查询结果分别落到 `seckill_activity`、`seckill_sku`、`seckill_stock_snapshot`、`seckill_result`。
 - `mall-message`：可靠消息和消费幂等分别落到 `mq_message`、`consume_record`。
 - `undo_log`、`tcc_fence_log`：为 Seata 事务和 TCC Fence 提供基础表；当前库存 TCC 主要使用 `tcc_fence_log` 处理空回滚、悬挂和二阶段幂等。
 
@@ -138,5 +142,5 @@ MySQL Binlog
 - 消费成功后手动 `basicAck`。
 - 消费异常时 `basicNack(requeue=false)`，消息进入对应死信队列。
 - 秒杀下单使用 `consume_record(message_id)` 唯一索引做消费幂等。
-- 秒杀查询结果先返回 `PROCESSING`，结果消息消费成功后更新 `seckill_result` 为 `SUCCESS` 或 `FAILED`。
+- 秒杀查询结果先返回 `PROCESSING`，结果消息消费成功后更新 `seckill_result` 为 `SUCCESS` 或 `FAILED`；订单创建失败时按 `seckill_stock_snapshot` 回补秒杀库存。
 - 延迟关单使用订单状态机做幂等保护，已支付订单不会被误关。

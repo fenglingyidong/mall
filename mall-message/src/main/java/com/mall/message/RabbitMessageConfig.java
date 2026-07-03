@@ -13,6 +13,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.util.Map;
@@ -20,6 +21,15 @@ import java.util.Map;
 @Configuration
 @EnableScheduling
 public class RabbitMessageConfig {
+
+    @Value("${spring.rabbitmq.listener.simple.concurrency:1}")
+    private int listenerConcurrency;
+
+    @Value("${spring.rabbitmq.listener.simple.max-concurrency:1}")
+    private int listenerMaxConcurrency;
+
+    @Value("${spring.rabbitmq.listener.simple.prefetch:1}")
+    private int listenerPrefetch;
 
     @Bean
     public DirectExchange mallExchange() {
@@ -160,6 +170,9 @@ public class RabbitMessageConfig {
         factory.setMessageConverter(messageConverter);
         factory.setAcknowledgeMode(AcknowledgeMode.MANUAL);
         factory.setDefaultRequeueRejected(false);
+        factory.setConcurrentConsumers(Math.max(1, listenerConcurrency));
+        factory.setMaxConcurrentConsumers(Math.max(Math.max(1, listenerConcurrency), listenerMaxConcurrency));
+        factory.setPrefetchCount(Math.max(1, listenerPrefetch));
         return factory;
     }
 }

@@ -1,0 +1,36 @@
+debug: false
+
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 100
+      minimum-idle: 100
+      connection-timeout: 30000
+      validation-timeout: 5000
+
+mall:
+  seckill:
+    permits-per-second: 10000
+    stock-cache:
+      enabled: false
+    load-test:
+      stock-deduct-enabled: true
+      connection-warmup-enabled: true
+      connection-warmup-size: 100
+
+logging:
+  level:
+    root: INFO
+    web: WARN
+    sql: WARN
+    "[org.springframework]": INFO
+    "[org.springframework.boot]": INFO
+    "[org.springframework.boot.web]": INFO
+    "[org.springframework.boot.actuate]": WARN
+    "[org.springframework.boot.availability]": INFO
+    "[org.springframework.boot.autoconfigure.logging.ConditionEvaluationReportLogger]": OFF
+    "[org.springframework.web]": WARN
+    "[org.springframework.web.servlet]": WARN
+    "[org.mybatis]": WARN
+    "[com.baomidou.mybatisplus]": WARN
+    "[com.alibaba.nacos]": WARN

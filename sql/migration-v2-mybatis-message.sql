@@ -1,5 +1,6 @@
 DROP TABLE IF EXISTS mq_message;
 DROP TABLE IF EXISTS consume_record;
+DROP TABLE IF EXISTS seckill_stock_snapshot;
 DROP TABLE IF EXISTS seckill_result;
 DROP TABLE IF EXISTS seckill_sku;
 DROP TABLE IF EXISTS seckill_activity;
@@ -18,6 +19,7 @@ CREATE TABLE IF NOT EXISTS seckill_sku (
     sku_name VARCHAR(128) NOT NULL,
     seckill_price DECIMAL(10, 2) NOT NULL,
     stock INT NOT NULL,
+    version BIGINT NOT NULL DEFAULT 0,
     UNIQUE KEY uk_activity_sku (activity_id, sku_id)
 );
 
@@ -27,6 +29,22 @@ CREATE TABLE IF NOT EXISTS seckill_result (
     order_sn VARCHAR(64),
     message VARCHAR(255),
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS seckill_stock_snapshot (
+    request_id VARCHAR(64) PRIMARY KEY,
+    stock_id BIGINT NOT NULL,
+    activity_id BIGINT NOT NULL,
+    sku_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    quantity INT NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    order_sn VARCHAR(64),
+    message VARCHAR(255),
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    KEY idx_snapshot_user (activity_id, sku_id, user_id),
+    KEY idx_snapshot_status (status)
 );
 
 CREATE TABLE IF NOT EXISTS mq_message (

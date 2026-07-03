@@ -23,4 +23,6 @@ public class SeckillSkuEntity {
     private BigDecimal seckillPrice;
 
     private Integer stock;
+
+    private Long version;
 }

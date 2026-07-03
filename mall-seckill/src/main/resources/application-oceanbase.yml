@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: jdbc:oceanbase://localhost:2881/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: root@test
+    password:
+    driver-class-name: com.oceanbase.jdbc.Driver
+  data:
+    redis:
+      host: localhost
+      port: 6380
+      timeout: 500ms
+
+mall:
+  seckill:
+    stock-cache:
+      enabled: true
+      fail-fast: true
+      key-prefix: "seckill:stock-cache:"

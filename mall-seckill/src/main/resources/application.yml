@@ -1,5 +1,11 @@
 server:
   port: 8105
+  tomcat:
+    threads:
+      max: 500
+      min-spare: 50
+    accept-count: 1000
+    max-connections: 10000
 
 spring:
   application:
@@ -33,11 +39,52 @@ spring:
 mall:
   seckill:
     permits-per-second: 100
+    metadata-cache-ttl-millis: 1000
     lock:
       enabled: true
       wait-millis: 100
-      lease-millis: 3000
+      lease-millis: 0
+    stock-cache:
+      enabled: false
+      fail-fast: true
+      key-prefix: "seckill:stock-cache:"
+    load-test:
+      stock-deduct-enabled: false
 
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        seckill.stock.deduct.total: true
+        seckill.stock.deduct.update: true
+        seckill.stock.deduct.select: true
+        seckill.stock.deduct.update-only.total: true
+        seckill.stock.deduct.update-only.update: true
+        seckill.submit.total: true
+        seckill.submit.sentinel: true
+        seckill.submit.metadata: true
+        seckill.submit.lock: true
+        seckill.submit.stock-cache.sold-out: true
+        seckill.submit.stock-cache.refresh: true
+        seckill.submit.mq.publish: true
+        seckill.submit.record.total: true
+        seckill.submit.record.duplicate: true
+        seckill.submit.record.snapshot.insert: true
+        seckill.submit.record.stock.update: true
+        seckill.submit.record.stock.select: true
+        seckill.submit.result.save: true
+        seckill.submit.release.total: true
+        seckill.submit.release.snapshot.update: true
+        seckill.submit.release.stock.update: true
+        seckill.submit.release.stock.select: true
