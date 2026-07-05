@@ -35,11 +35,21 @@ public class ReliableMessageRepository {
     }
 
     public void markSent(String messageId) {
-        update(messageId, MessageStatus.SENT, null);
+        messageMapper.update(null, Wrappers.<MqMessageEntity>update()
+                .eq("message_id", messageId)
+                .in("status", MessageStatus.NEW.name(), MessageStatus.FAILED.name())
+                .set("status", MessageStatus.SENT.name())
+                .set("error_message", null)
+                .set("updated_at", LocalDateTime.now()));
     }
 
     public void markFailed(String messageId, String error) {
-        update(messageId, MessageStatus.FAILED, error);
+        messageMapper.update(null, Wrappers.<MqMessageEntity>update()
+                .eq("message_id", messageId)
+                .ne("status", MessageStatus.CONSUMED.name())
+                .set("status", MessageStatus.FAILED.name())
+                .set("error_message", error)
+                .set("updated_at", LocalDateTime.now()));
     }
 
     public void markConsumed(String messageId) {
@@ -63,11 +73,11 @@ public class ReliableMessageRepository {
     }
 
     private void update(String messageId, MessageStatus status, String error) {
-        messageMapper.update(null, Wrappers.<MqMessageEntity>lambdaUpdate()
-                .eq(MqMessageEntity::getMessageId, messageId)
-                .set(MqMessageEntity::getStatus, status.name())
-                .set(MqMessageEntity::getErrorMessage, error)
-                .set(MqMessageEntity::getUpdatedAt, LocalDateTime.now()));
+        messageMapper.update(null, Wrappers.<MqMessageEntity>update()
+                .eq("message_id", messageId)
+                .set("status", status.name())
+                .set("error_message", error)
+                .set("updated_at", LocalDateTime.now()));
     }
 
     private MessageRecord toRecord(MqMessageEntity entity) {

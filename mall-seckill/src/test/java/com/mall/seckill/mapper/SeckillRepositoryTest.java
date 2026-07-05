@@ -20,6 +20,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DuplicateKeyException;
 
 import java.util.List;
 import java.util.Map;
@@ -30,6 +31,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -81,6 +83,7 @@ class SeckillRepositoryTest {
         assertThat(inserted.getActivityId()).isEqualTo(1L);
         assertThat(inserted.getSkuId()).isEqualTo(1001L);
         assertThat(inserted.getUserId()).isEqualTo(101L);
+        assertThat(inserted.getActiveKey()).isEqualTo(101L);
         assertThat(inserted.getQuantity()).isEqualTo(1);
         assertThat(inserted.getStatus()).isEqualTo("DEDUCTED");
         verify(skuMapper).deductStockAndIncreaseVersionById(10L, 1);
@@ -89,6 +92,46 @@ class SeckillRepositoryTest {
         verify(resultMapper).insert(resultCaptor.capture());
         assertThat(resultCaptor.getValue().getRequestId()).isEqualTo("r1");
         assertThat(resultCaptor.getValue().getStatus()).isEqualTo("PROCESSING");
+    }
+
+    @Test
+    void shouldRunOutboxHookBeforeHotStockUpdate() {
+        Runnable beforeStockUpdate = mock(Runnable.class);
+        when(snapshotMapper.selectCount(any())).thenReturn(0L);
+        when(skuMapper.deductStockAndIncreaseVersionById(10L, 1)).thenReturn(1);
+        when(skuMapper.selectStockVersionById(10L)).thenReturn(new StockVersion(49, 1L));
+
+        repository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1, beforeStockUpdate);
+
+        InOrder order = inOrder(snapshotMapper, beforeStockUpdate, skuMapper);
+        order.verify(snapshotMapper).insert(any(SeckillStockSnapshotEntity.class));
+        order.verify(beforeStockUpdate).run();
+        order.verify(skuMapper).deductStockAndIncreaseVersionById(10L, 1);
+    }
+
+    @Test
+    void shouldReturnDuplicateWhenActiveDeductionExistsForActivityUser() {
+        when(snapshotMapper.selectCount(any())).thenReturn(1L);
+
+        StockDeductionResult result = repository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1);
+
+        assertThat(result.code()).isEqualTo(2);
+        verify(snapshotMapper, never()).insert(any(SeckillStockSnapshotEntity.class));
+        verify(skuMapper, never()).deductStockAndIncreaseVersionById(anyLong(), any());
+        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
+    }
+
+    @Test
+    void shouldReturnDuplicateWhenSnapshotUniqueKeyRejectsConcurrentInsert() {
+        when(snapshotMapper.selectCount(any())).thenReturn(0L);
+        when(snapshotMapper.insert(any(SeckillStockSnapshotEntity.class)))
+                .thenThrow(new DuplicateKeyException("duplicate active user"));
+
+        StockDeductionResult result = repository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1);
+
+        assertThat(result.code()).isEqualTo(2);
+        verify(skuMapper, never()).deductStockAndIncreaseVersionById(anyLong(), any());
+        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
     }
 
     @Test
@@ -165,6 +208,7 @@ class SeckillRepositoryTest {
         StockReleaseResult result = repository.releaseDeduction("r1", "Order failed");
 
         assertThat(result.snapshot().status()).isEqualTo("RELEASED");
+        assertThat(snapshot.getActiveKey()).isNull();
         assertThat(result.stockVersion()).isEqualTo(stockVersion);
         InOrder order = inOrder(snapshotMapper, skuMapper);
         order.verify(snapshotMapper).update(isNull(), any());
@@ -173,6 +217,17 @@ class SeckillRepositoryTest {
         verify(skuMapper, never()).releaseStockAndIncreaseVersion(anyLong(), anyLong(), any());
         verify(skuMapper, never()).selectStockVersion(anyLong(), anyLong());
         verify(skuMapper, never()).releaseStock(anyLong(), anyLong(), any());
+    }
+
+    @Test
+    void shouldMapSnapshotActiveKeyField() {
+        TableInfo tableInfo = TableInfoHelper.getTableInfo(SeckillStockSnapshotEntity.class);
+
+        assertThat(tableInfo.getFieldList())
+                .anySatisfy(field -> {
+                    assertThat(field.getProperty()).isEqualTo("activeKey");
+                    assertThat(field.getColumn()).isEqualTo("active_key");
+                });
     }
 
     @Test
@@ -217,6 +272,7 @@ class SeckillRepositoryTest {
         snapshot.setActivityId(1L);
         snapshot.setSkuId(1001L);
         snapshot.setUserId(101L);
+        snapshot.setActiveKey(101L);
         snapshot.setQuantity(quantity);
         snapshot.setStatus(status);
         return snapshot;

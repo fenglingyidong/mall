@@ -235,6 +235,267 @@ jmeter -n -t mall-pressure.jmx -l result.jtl -e -o report
 
 脚本会为每次请求生成独立 `X-User-Id`，避免把持续压测误测成同一用户重复提交。脚本内置业务断言：响应 JSON 的 `code != 0` 会被 JMeter 标记为失败，因此 Sentinel `429` 不会再混入 HTTP 200 成功样本。
 
+### 阶段一一键验收
+
+阶段一完整验收优先使用仓库脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File docs/scripts/verify-seckill-stage1.ps1 `
+  -DbPort 2881 `
+  -RedisPort 6381 `
+  -ServicePort 8105 `
+  -Stock 1000 `
+  -Threads 200 `
+  -Loops 5
+```
+
+前置条件：
+
+- Docker 环境先启动 OceanBase CE 与 TairString：
+
+```powershell
+docker compose up -d oceanbase tairstring
+```
+
+如果本机已经有手工启动的 `mall-oceanbase-ce` 同名容器，先复用现有容器；需要迁移为 compose 管理时，先确认容器内数据可丢弃或已备份，再删除旧容器后执行上面的命令。
+
+- `mall-seckill` 使用 `oceanbase` profile 启动，并连接真实 OceanBase CE 与 TairString。
+- `mall-order` 指向同一个 OceanBase 库，并提高 Rabbit listener 并发，例如 `concurrency=8`、`max-concurrency=16`、`prefetch=50`。
+- JMeter、`mysql` 客户端、`redis-cli` 可以在当前 PowerShell 中直接执行；路径不一致时通过 `-JMeterPath`、`-MysqlCliPath`、`-RedisCliPath` 参数覆盖。
+- 目标环境必须是压测环境。脚本会清理 `seckill_stock_snapshot`、`seckill_result`、当前活动的 `seckill_order`、`mq_message`、`consume_record`，并重置目标 `seckill_sku.stock/version`。
+
+脚本执行内容：
+
+- 删除 TairString 缓存 key `seckill:stock-cache:{activityId}:{skuId}`。
+- 调用 `docs/jmeter/seckill-submit.jmx` 发起秒杀提交压测。
+- 等待异步建单与结果回传追平，默认等待 `60s`。
+- 校验 `seckill_sku`、`seckill_stock_snapshot`、`seckill_result`、`seckill_order`、秒杀 MQ 消息状态和 TairString `stock/version`。
+- 输出 `target/loadtest/stage1-verify-<timestamp>.json`，同时生成 JMeter `.jtl` 与 HTML 报告。
+
+通过标准：
+
+- JMeter 失败数不超过 `-MaxJMeterFailures`，默认必须为 `0`。
+- `seckill_sku.stock = 初始库存 - 预期成功数`，`version = 预期成功数`。
+- `seckill_stock_snapshot.CONFIRMED = 预期成功数`，`DEDUCTED = 0`。
+- `seckill_result.SUCCESS = 预期成功数`，`FAILED = 0`。
+- `seckill_order = 预期成功数`。
+- 秒杀创建和结果消息没有未消费残留。
+- TairString 缓存值和版本与数据库一致。
+
+### 阶段二一键验收
+
+阶段二仍保持“单行库存”模型，不追本地 Docker 环境的 `6k QPS`，验收重点是：阶段一账本闭合、热点 SKU 独立限流、热点并发保护、连接池/元数据/TairString 预热和可复现压测摘要。
+
+推荐启动 `mall-seckill` 时使用 `oceanbase,perf` profile，并显式打开热点配置：
+
+```powershell
+java -jar mall-seckill/target/mall-seckill-0.0.1-SNAPSHOT.jar `
+  --spring.profiles.active=oceanbase,perf `
+  --spring.cloud.nacos.discovery.server-addr=localhost:18848 `
+  --spring.cloud.sentinel.transport.dashboard=localhost:18858 `
+  --mall.seckill.hotspot.enabled=true `
+  --mall.seckill.hotspot.items[0]=1:1001 `
+  --mall.seckill.hotspot.permits-per-second=10000 `
+  --mall.seckill.hotspot.max-concurrent=300 `
+  --mall.seckill.hotspot.warmup-enabled=true
+```
+
+`mall-order` 继续指向同一个 OceanBase 库，并提高 Rabbit listener 并发：
+
+```powershell
+java -jar mall-order/target/mall-order-0.0.1-SNAPSHOT.jar `
+  --spring.cloud.nacos.discovery.server-addr=localhost:18848 `
+  --spring.datasource.url="jdbc:mysql://localhost:2881/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true" `
+  --spring.datasource.username=root@test `
+  --spring.rabbitmq.listener.simple.concurrency=8 `
+  --spring.rabbitmq.listener.simple.max-concurrency=16 `
+  --spring.rabbitmq.listener.simple.prefetch=50
+```
+
+执行阶段二脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File docs/scripts/verify-seckill-stage2.ps1 `
+  -JMeterPath "C:\Java\apache-jmeter-5.6.3\bin\jmeter.bat" `
+  -DbPort 2881 `
+  -RedisPort 6381 `
+  -ServicePort 8105 `
+  -Stock 1000 `
+  -Threads 200 `
+  -Loops 5 `
+  -HotspotThreads 200 `
+  -HotspotLoops 2
+```
+
+如果要专门证明热点限流生效，可以临时把 `mall.seckill.hotspot.permits-per-second` 或 `mall.seckill.hotspot.max-concurrent` 调低，并给脚本传入 `-MinHotspotFailures 1`。脚本把 JMeter 业务失败和 HTTP 500 分开统计：热点限流导致的业务失败可以接受，HTTP 500 不可接受。
+
+脚本输出：
+
+- `target/loadtest/stage2-verify-<timestamp>.json`
+- `target/loadtest/jmeter-seckill-stage2-main-<timestamp>.jtl`
+- `target/loadtest/jmeter-report-seckill-stage2-main-<timestamp>`
+- `target/loadtest/jmeter-seckill-stage2-hotspot-<timestamp>.jtl`
+- `target/loadtest/jmeter-report-seckill-stage2-hotspot-<timestamp>`
+
+通过标准：
+
+- 主链路场景 JMeter 失败数为 `0`。
+- 主链路库存、版本、快照、结果、订单、MQ 消息状态和 TairString `stock/version` 全部对齐。
+- 热点场景没有 HTTP 500。
+- 热点场景不超卖，`stock = 初始库存 - CONFIRMED`，`DEDUCTED = 0`，秒杀 MQ 消息没有未消费残留。
+- 设置 `-MinHotspotFailures` 时，热点场景失败数必须达到该阈值，用于证明热点 QPS/并发保护确实生效。
+
+### 2026-07-03 阶段二正式秒杀接口阶梯压测
+
+本轮压测对象为正式秒杀提交接口，不使用 stock-only 或 update-only 快路径：
+
+- 接口：`POST /api/seckill/1/1001`。
+- JMeter 脚本：`docs/jmeter/seckill-submit.jmx`。
+- 服务口径：`mall-seckill` 使用 `oceanbase,perf` profile，`mall-order` 指向同一个 OceanBase；热点 SKU 为 `1:1001`。
+- 热点保护：`mall.seckill.hotspot.max-concurrent=300`，`mall.seckill.hotspot.permits-per-second=10000`。
+- 阶梯档位：`50/100/150/200/300/400/500` 并发。
+- 每档独立运行：`loops=5`、`ramp=2`，每档开始前重置库存为本档请求数、清理快照/结果/订单/可靠消息/TairString 缓存。
+- QPS 口径：`请求 QPS = JMeter 总样本数 / 样本窗口耗时`；`成功受理 QPS = JMeter success=true 样本数 / 样本窗口耗时`。`400/500` 并发档包含热点保护返回的业务失败，因此不能只看总请求 QPS。
+- 摘要文件：`target/loadtest/seckill-stage2-ladder-20260703-231445.json`。
+
+阶梯结果：
+
+| 并发 | 请求数 | 请求 QPS | 成功受理 QPS | JMeter 失败 | 失败率 | HTTP 5xx | P95 | P99 | CONFIRMED | DEDUCTED 残留 | TairString 对齐 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 50 | 250 | 153.28 | 153.28 | 0 | 0.00% | 0 | 95ms | 109ms | 250 | 0 | 是 |
+| 100 | 500 | 221.63 | 221.63 | 0 | 0.00% | 0 | 417ms | 427ms | 500 | 0 | 是 |
+| 150 | 750 | 239.69 | 239.69 | 0 | 0.00% | 0 | 593ms | 629ms | 750 | 0 | 是 |
+| 200 | 1000 | 233.97 | 233.97 | 0 | 0.00% | 0 | 993ms | 1254ms | 1000 | 0 | 是 |
+| 300 | 1500 | 257.69 | 257.69 | 0 | 0.00% | 0 | 1514ms | 1806ms | 1500 | 0 | 是 |
+| 400 | 2000 | 318.93 | 223.89 | 596 | 29.80% | 0 | 1931ms | 2192ms | 1404 | 0 | 是 |
+| 500 | 2500 | 448.91 | 244.39 | 1139 | 45.56% | 0 | 1792ms | 1958ms | 1361 | 0 | 是 |
+
+本轮结论：
+
+- 在当前本地 Docker OceanBase + TairString + RabbitMQ 环境下，正式秒杀主链路无业务失败的最高阶梯是 `300` 并发，成功受理 QPS 约 `257.69`。
+- `400/500` 并发档总请求 QPS 更高，是因为大量请求被热点保护快速拒绝；失败样本 HTTP 状态仍为 `200`，响应业务码为 `429`，典型样本为 `{"code":429,"message":"Hotspot seckill busy","data":null}`。
+- 全部阶梯均没有 HTTP 5xx，没有 `DEDUCTED` 残留，没有未消费秒杀 MQ 消息；数据库库存、确认订单数和 TairString `stock/version` 均对齐。
+- 阶段二当前瓶颈已经从默认入口限流转为热点并发保护与单行库存事务链路；简历展示口径建议写“正式主链路本地可复现约 `250+` 成功受理 QPS，超过 `300` 并发后热点保护开始介入”，不要把 `400/500` 档的总请求 QPS 当作真实下单能力。
+
+### 2026-07-04 热点保护拉高后的主链路极限与 UPDATE 基准
+
+本轮目的：把热点快速拒绝阈值拉高，避免 `max-concurrent=300` 提前挡住请求，继续摸正式秒杀主链路和库存 `UPDATE` 的真实上限。
+
+服务启动差异：
+
+- `mall-seckill` 使用 `oceanbase,perf` profile。
+- 运行时覆盖 `--mall.seckill.hotspot.max-concurrent=2000`。
+- 保持 `--mall.seckill.hotspot.permits-per-second=10000`、`--mall.seckill.permits-per-second=10000`。
+- `mall-order` 继续使用 OceanBase 和 RabbitMQ 高消费并发。
+
+正式秒杀主链路阶梯：
+
+- 接口：`POST /api/seckill/1/1001`。
+- JMeter 脚本：`docs/jmeter/seckill-submit.jmx`。
+- 口径：每档独立重置库存；`loops=5`、`ramp=3`。
+- 摘要文件：`target/loadtest/seckill-stage2-hotspot2000-ladder-20260703-234605.json`。
+
+| 并发 | 请求数 | 成功受理 QPS | JMeter 失败 | HTTP 5xx | P95 | P99 | 账本闭合情况 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 300 | 1500 | 147.43 | 0 | 0 | 2451ms | 2997ms | 脚本窗口内闭合 |
+| 400 | 2000 | 161.66 | 0 | 0 | 3189ms | 3983ms | 脚本窗口内闭合 |
+| 500 | 2500 | 148.15 | 0 | 0 | 4553ms | 5468ms | 脚本窗口内闭合 |
+| 700 | 3500 | 153.54 | 0 | 0 | 7338ms | 8946ms | 脚本窗口内闭合 |
+| 1000 | 5000 | 216.40 | 0 | 0 | 5707ms | 6893ms | JMeter 全成功；结果消息约额外 `30s` 后闭合 |
+
+主链路结论：
+
+- 拉高热点保护后，`400/500/700` 档不再出现 `Hotspot seckill busy`，说明上一轮 `400/500` 的大量失败确实来自热点并发保护，而不是服务端崩溃。
+- 当前正式主链路入口在本机单 JMeter 下看到的最高成功受理 QPS 是 `216.40`，出现在 `1000` 并发档。
+- 但 `1000` 档已经出现异步结果链路滞后：JMeter 结束时 5000 个订单已创建，`seckill_result` 和快照确认还没完全追平；额外等待约 `30s` 后 `CONFIRMED=5000`、`DEDUCTED=0`、未消费秒杀 MQ 为 `0`。
+- 因此更稳妥的展示口径是：正式主链路“入口受理峰值约 `216 QPS`，稳定闭合区间约 `150-160 QPS`；继续加并发主要拉高异步结果滞后和尾延迟”。
+
+MyBatis update-only HTTP 阶梯：
+
+- 接口：`POST /internal/seckill/loadtest/stock-deduct-update-only/1/1001`。
+- 执行内容：应用内 MyBatis 调用 `UPDATE seckill_sku SET stock = stock - 1, version = version + 1 WHERE id = ? AND stock >= ?`，无 `@Transactional`，无后续 `SELECT`。
+- 临时 JMeter 脚本：`target/loadtest/seckill-update-only-temp.jmx`。
+- 口径：每档重置 `seckill_sku.stock=1000000, version=0`；`loops=10`、`ramp=3`。
+- 摘要文件：`target/loadtest/seckill-update-only-ladder-20260704-000039.json`。
+
+| 并发 | 请求数 | 成功数 | 失败原因 | 成功 QPS | P95 | P99 |
+| ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| 100 | 1000 | 1000 | 无 | 334.56 | 60ms | 199ms |
+| 200 | 2000 | 2000 | 无 | 569.48 | 372ms | 734ms |
+| 300 | 3000 | 3000 | 无 | 608.52 | 597ms | 934ms |
+| 500 | 5000 | 5000 | 无 | 663.31 | 940ms | 1322ms |
+| 700 | 7000 | 1834 | JMeter 客户端 `Address already in use: connect` | 323.34 | 1300ms | 2124ms |
+| 1000 | 10000 | 12 | JMeter 客户端 `Address already in use: connect` | 2.38 | 347ms | 470ms |
+
+update-only 结论：
+
+- 在不触发本机 JMeter 端口耗尽的档位里，MyBatis update-only HTTP 入口最高成功 QPS 为 `663.31`。
+- `700/1000` 档不能作为服务端上限，因为失败样本都是压测端 `java.net.BindException: Address already in use: connect`，不是服务端 5xx，也不是库存扣减失败。
+- 相比正式秒杀主链路，update-only 少了快照、结果、可靠消息、RabbitMQ 和订单结果回传，所以能到 `600+ QPS`；这说明正式主链路的主要开销不只是库存行 `UPDATE`，还包括事务内账本写入和异步消息闭环。
+
+OceanBase 裸热点行 `UPDATE` 基准：
+
+- 方式：临时 Java/JDBC 压测器，每个线程一条 JDBC 连接，autocommit 单语句更新。
+- 测试表：`hot_row_bench(id BIGINT PRIMARY KEY, k BIGINT NOT NULL)`。
+- SQL：`UPDATE hot_row_bench SET k = k + 1 WHERE id = 1`。
+- 结果文件：`target/loadtest/hot-row-update-bench-20260704-0000.txt`。
+
+| 并发 | 总更新数 | 成功数 | 错误数 | TPS | 平均耗时 | P50 | P90 | P95 | P99 | Max |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 50 | 50000 | 50000 | 0 | 750.51 | 63.97ms | 27ms | 167ms | 278ms | 529ms | 1595ms |
+| 100 | 100000 | 100000 | 0 | 1452.35 | 64.32ms | 12ms | 224ms | 336ms | 597ms | 1924ms |
+| 200 | 100000 | 100000 | 0 | 1339.80 | 135.36ms | 20ms | 397ms | 592ms | 1103ms | 3300ms |
+
+裸 SQL 结论：
+
+- 当前环境里，单热点行裸 `UPDATE` 最好档为 `100` 并发，约 `1452 TPS`。
+- 这个数与前一轮 `1.3k-1.6k TPS` 判断一致，说明 OceanBase 热点行本体能力仍是千级。
+- 从能力层级看：裸 SQL `~1452 TPS` > MyBatis update-only HTTP `~663 QPS` > 正式秒杀主链路稳定闭合 `~150-160 QPS` / 入口峰值 `~216 QPS`。这条差距链路就是后续优化要拆的部分。
+
+### 2026-07-04 ELR 开关对热点行 UPDATE 的影响
+
+官方热点行体验文档给出的基准之一是：
+
+- Parallel Degree：`50`。
+- Total Updates：`100000`。
+- 未开启 ELR：`54.5s`，`1834.86 TPS`。
+- 开启 ELR 且设置 `_max_elr_dependent_trx_count=1000`：`12.16s`，`8223.68 TPS`。
+
+本地复测说明：
+
+- OceanBase CE：`5.7.25-OceanBase_CE-v4.4.2.1`。
+- 本地 CE 镜像只暴露 `enable_early_lock_release`，未暴露 `_max_elr_dependent_trx_count`。
+- 压测方式：临时 Java/JDBC 压测器，每线程一条连接，autocommit 单语句更新。
+- 同样使用 `50` 并发、`100000` 次总更新。
+- SQL：`UPDATE hot_row_bench SET k = k + 1 WHERE id = 1`。
+- 结果文件：
+  - `target/loadtest/hot-row-update-elr-off-20260704-clean.txt`
+  - `target/loadtest/hot-row-update-elr-on-20260704-clean.txt`
+
+| ELR | 总更新数 | 成功数 | 错误数 | 耗时 | TPS | 平均耗时 | P50 | P90 | P95 | P99 | Max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 关闭 | 100000 | 100000 | 0 | 589.739s | 169.57 | 290.88ms | 430ms | 583ms | 650ms | 813ms | 1111ms |
+| 开启 | 100000 | 100000 | 0 | 117.071s | 854.18 | 57.22ms | 15ms | 166ms | 283ms | 545ms | 1716ms |
+
+补充高线程数实验：
+
+- ELR：开启。
+- Parallel Degree：`5000`。
+- 每线程更新：`20` 次。
+- Total Updates：`100000`。
+- 结果文件：`target/loadtest/hot-row-update-elr-on-5000x20-20260704.txt`。
+
+| 并发 | 每线程更新 | 目标总更新 | 成功数 | 错误数 | TPS | 耗时 | 平均耗时 | P50 | P95 | P99 | Max |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5000 | 20 | 100000 | 6786 | 93214 | 33.53 | 202.369s | 5326.39ms | 5163ms | 9488ms | 9855ms | 9929ms |
+
+本地结论：
+
+- 仅切换 `enable_early_lock_release` 后，本地热点行 UPDATE TPS 从 `169.57` 提升到 `854.18`，约 `5.04x`。
+- `5000` 线程组不是有效的数据库热点行吞吐上限：只有 `6786/100000` 次成功，大量错误发生在极端线程/连接压力下；该组主要说明本地 Docker + 单 JVM 压测器无法承载 5000 条并发 JDBC 连接。
+- 本地绝对值低于官方示例，主要差异是：当前 Docker CE 环境资源更弱，且 `_max_elr_dependent_trx_count=1000` 在当前镜像中不可见/不可配置；本地压测器也不是官方 Python 脚本的完全同环境复刻。
+- 但趋势与官方一致：开启 ELR 后，热点行更新的等待和吞吐有数量级改善。后续项目压测应保持 `enable_early_lock_release=true`，并继续把 `_max_elr_dependent_trx_count` 记录为“当前 CE 镜像不可配的官方体验参数”。
+
 秒杀瓶颈诊断建议至少跑三组同口径对比：
 
 | 组别 | `mall-seckill` 参数 | `mall-order` 参数 | 目的 |

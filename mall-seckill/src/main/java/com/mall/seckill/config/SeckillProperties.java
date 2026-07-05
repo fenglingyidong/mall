@@ -1,5 +1,7 @@
 package com.mall.seckill.config;
 
+import java.util.ArrayList;
+import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "mall.seckill")
@@ -10,6 +12,7 @@ public class SeckillProperties {
     private Lock lock = new Lock();
     private StockCache stockCache = new StockCache();
     private LoadTest loadTest = new LoadTest();
+    private Hotspot hotspot = new Hotspot();
 
     public int getPermitsPerSecond() {
         return permitsPerSecond;
@@ -51,6 +54,14 @@ public class SeckillProperties {
         this.loadTest = loadTest;
     }
 
+    public Hotspot getHotspot() {
+        return hotspot;
+    }
+
+    public void setHotspot(Hotspot hotspot) {
+        this.hotspot = hotspot;
+    }
+
     public static class Lock {
 
         private boolean enabled = true;
@@ -87,6 +98,7 @@ public class SeckillProperties {
         private boolean enabled = false;
         private boolean failFast = true;
         private String keyPrefix = "seckill:stock-cache:";
+        private Repair repair = new Repair();
 
         public boolean isEnabled() {
             return enabled;
@@ -110,6 +122,45 @@ public class SeckillProperties {
 
         public void setKeyPrefix(String keyPrefix) {
             this.keyPrefix = keyPrefix;
+        }
+
+        public Repair getRepair() {
+            return repair;
+        }
+
+        public void setRepair(Repair repair) {
+            this.repair = repair;
+        }
+    }
+
+    public static class Repair {
+
+        private boolean enabled = false;
+        private long fixedDelay = 60000;
+        private int limit = 1000;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getFixedDelay() {
+            return fixedDelay;
+        }
+
+        public void setFixedDelay(long fixedDelay) {
+            this.fixedDelay = fixedDelay;
+        }
+
+        public int getLimit() {
+            return limit;
+        }
+
+        public void setLimit(int limit) {
+            this.limit = limit;
         }
     }
 
@@ -141,6 +192,55 @@ public class SeckillProperties {
 
         public void setConnectionWarmupSize(int connectionWarmupSize) {
             this.connectionWarmupSize = connectionWarmupSize;
+        }
+    }
+
+    public static class Hotspot {
+
+        private boolean enabled = false;
+        private List<String> items = new ArrayList<>();
+        private int permitsPerSecond = 100;
+        private int maxConcurrent = 100;
+        private boolean warmupEnabled = false;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public List<String> getItems() {
+            return items;
+        }
+
+        public void setItems(List<String> items) {
+            this.items = items == null ? new ArrayList<>() : items;
+        }
+
+        public int getPermitsPerSecond() {
+            return permitsPerSecond;
+        }
+
+        public void setPermitsPerSecond(int permitsPerSecond) {
+            this.permitsPerSecond = permitsPerSecond;
+        }
+
+        public int getMaxConcurrent() {
+            return maxConcurrent;
+        }
+
+        public void setMaxConcurrent(int maxConcurrent) {
+            this.maxConcurrent = maxConcurrent;
+        }
+
+        public boolean isWarmupEnabled() {
+            return warmupEnabled;
+        }
+
+        public void setWarmupEnabled(boolean warmupEnabled) {
+            this.warmupEnabled = warmupEnabled;
         }
     }
 }

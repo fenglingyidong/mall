@@ -7,6 +7,7 @@ import com.mall.seckill.service.impl.SentinelSeckillGuard;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Component
@@ -20,9 +21,20 @@ public class SentinelFlowRuleConfig {
 
     @PostConstruct
     public void loadRules() {
-        FlowRule rule = new FlowRule(SentinelSeckillGuard.SUBMIT_RESOURCE);
-        rule.setGrade(RuleConstant.FLOW_GRADE_QPS);
-        rule.setCount(properties.getPermitsPerSecond());
-        FlowRuleManager.loadRules(List.of(rule));
+        List<FlowRule> rules = new ArrayList<>();
+        FlowRule submitRule = new FlowRule(SentinelSeckillGuard.SUBMIT_RESOURCE);
+        submitRule.setGrade(RuleConstant.FLOW_GRADE_QPS);
+        submitRule.setCount(properties.getPermitsPerSecond());
+        rules.add(submitRule);
+
+        SeckillProperties.Hotspot hotspot = properties.getHotspot();
+        if (hotspot.isEnabled()) {
+            FlowRule hotspotRule = new FlowRule(SentinelSeckillGuard.HOTSPOT_SUBMIT_RESOURCE);
+            hotspotRule.setGrade(RuleConstant.FLOW_GRADE_QPS);
+            hotspotRule.setCount(hotspot.getPermitsPerSecond());
+            rules.add(hotspotRule);
+        }
+
+        FlowRuleManager.loadRules(rules);
     }
 }

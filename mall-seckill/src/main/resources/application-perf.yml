@@ -1,10 +1,15 @@
 debug: false
 
+server:
+  tomcat:
+    mbeanregistry:
+      enabled: true
+
 spring:
   datasource:
     hikari:
-      maximum-pool-size: 100
-      minimum-idle: 100
+      maximum-pool-size: 200
+      minimum-idle: 200
       connection-timeout: 30000
       validation-timeout: 5000
 
@@ -12,11 +17,20 @@ mall:
   seckill:
     permits-per-second: 10000
     stock-cache:
-      enabled: false
+      enabled: true
+      repair:
+        enabled: false
+    hotspot:
+      enabled: true
+      items:
+        - "1:1001"
+      permits-per-second: 10000
+      max-concurrent: 300
+      warmup-enabled: true
     load-test:
       stock-deduct-enabled: true
       connection-warmup-enabled: true
-      connection-warmup-size: 100
+      connection-warmup-size: 200
 
 logging:
   level:

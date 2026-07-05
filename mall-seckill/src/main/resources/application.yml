@@ -48,6 +48,16 @@ mall:
       enabled: false
       fail-fast: true
       key-prefix: "seckill:stock-cache:"
+      repair:
+        enabled: false
+        fixed-delay: 60000
+        limit: 1000
+    hotspot:
+      enabled: false
+      items: []
+      permits-per-second: 100
+      max-concurrent: 100
+      warmup-enabled: false
     load-test:
       stock-deduct-enabled: false
 

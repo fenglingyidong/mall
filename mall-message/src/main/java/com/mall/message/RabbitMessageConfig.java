@@ -15,6 +15,7 @@ import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.Map;
 
@@ -160,6 +161,17 @@ public class RabbitMessageConfig {
         rabbitTemplate.setMessageConverter(messageConverter);
         rabbitTemplate.setMandatory(true);
         return rabbitTemplate;
+    }
+
+    @Bean
+    public ThreadPoolTaskExecutor reliableMessageDispatchExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setThreadNamePrefix("reliable-message-dispatch-");
+        executor.setCorePoolSize(2);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(10000);
+        executor.initialize();
+        return executor;
     }
 
     @Bean

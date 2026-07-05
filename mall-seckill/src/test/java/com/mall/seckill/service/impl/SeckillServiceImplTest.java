@@ -13,7 +13,6 @@ import com.mall.seckill.pojo.entity.SeckillSku;
 import com.mall.seckill.pojo.vo.SeckillResult;
 import com.mall.seckill.pojo.vo.SeckillSubmitResponse;
 import com.mall.seckill.pojo.vo.StockDeductionResult;
-import com.mall.seckill.pojo.vo.StockReleaseResult;
 import com.mall.seckill.pojo.vo.StockVersion;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
@@ -24,11 +23,13 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -52,6 +53,9 @@ class SeckillServiceImplTest {
     private SentinelSeckillGuard sentinelGuard;
 
     @Mock
+    private SeckillHotspotGuard hotspotGuard;
+
+    @Mock
     private ReliableMessagePublisher messagePublisher;
 
     @AfterEach
@@ -67,8 +71,11 @@ class SeckillServiceImplTest {
         StockVersion stockVersion = new StockVersion(49, 1L);
         when(repository.requireActivity(1L)).thenReturn(activity);
         when(repository.requireSku(1L, 1001L)).thenReturn(sku);
-        when(repository.recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), anyLong(), eq(1)))
-                .thenReturn(StockDeductionResult.success(stockVersion));
+        when(repository.recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), anyLong(), eq(1), any(Runnable.class)))
+                .thenAnswer(invocation -> {
+                    invocation.<Runnable>getArgument(6).run();
+                    return StockDeductionResult.success(stockVersion);
+                });
 
         UserContext.set(new UserInfo(101L, "u101"));
         SeckillSubmitResponse first = service.submit(1L, 1001L);
@@ -79,10 +86,10 @@ class SeckillServiceImplTest {
         assertThat(second.status()).isEqualTo("ACCEPTED");
         verify(repository, times(1)).requireActivity(1L);
         verify(repository, times(1)).requireSku(1L, 1001L);
-        verify(repository, never()).hasActiveDeduction(anyLong(), anyLong(), anyLong());
-        verify(repository, times(2)).recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), anyLong(), eq(1));
+        verify(repository, never()).hasActiveDeduction(anyLong(), anyLong());
+        verify(repository, times(2)).recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), anyLong(), eq(1), any(Runnable.class));
         verify(stockCache, times(2)).refresh(1L, 1001L, stockVersion);
-        verify(messagePublisher, times(2)).publishSeckillOrderCreate(anyString(), anyString());
+        verify(messagePublisher, times(2)).enqueueSeckillOrderCreate(anyString(), anyString());
         verify(repository, never()).saveResult(any());
     }
 
@@ -93,7 +100,7 @@ class SeckillServiceImplTest {
         SeckillSku sku = new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50);
         when(repository.requireActivity(1L)).thenReturn(activity);
         when(repository.requireSku(1L, 1001L)).thenReturn(sku);
-        when(repository.recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), eq(101L), eq(1)))
+        when(repository.recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), eq(101L), eq(1), any(Runnable.class)))
                 .thenReturn(StockDeductionResult.duplicate());
 
         UserContext.set(new UserInfo(101L, "u101"));
@@ -105,8 +112,8 @@ class SeckillServiceImplTest {
         verify(repository).saveResult(resultCaptor.capture());
         assertThat(resultCaptor.getValue().status()).isEqualTo("FAILED");
         assertThat(resultCaptor.getValue().message()).isEqualTo("Duplicate purchase");
-        verify(repository, never()).hasActiveDeduction(anyLong(), anyLong(), anyLong());
-        verify(messagePublisher, never()).publishSeckillOrderCreate(anyString(), anyString());
+        verify(repository, never()).hasActiveDeduction(anyLong(), anyLong());
+        verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString());
         verify(stockCache, never()).refresh(anyLong(), anyLong(), any());
     }
 
@@ -125,8 +132,8 @@ class SeckillServiceImplTest {
 
         assertThat(response.status()).isEqualTo("FAILED");
         assertThat(response.message()).isEqualTo("Stock not enough");
-        verify(repository, never()).recordDeduction(anyString(), anyLong(), anyLong(), anyLong(), anyLong(), eq(1));
-        verify(messagePublisher, never()).publishSeckillOrderCreate(anyString(), anyString());
+        verify(repository, never()).recordDeduction(anyString(), anyLong(), anyLong(), anyLong(), anyLong(), eq(1), any(Runnable.class));
+        verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString());
     }
 
     @Test
@@ -136,7 +143,7 @@ class SeckillServiceImplTest {
         SeckillSku sku = new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50);
         when(repository.requireActivity(1L)).thenReturn(activity);
         when(repository.requireSku(1L, 1001L)).thenReturn(sku);
-        when(repository.recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), eq(101L), eq(1)))
+        when(repository.recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), eq(101L), eq(1), any(Runnable.class)))
                 .thenThrow(new SeckillStockNotEnoughException());
 
         UserContext.set(new UserInfo(101L, "u101"));
@@ -146,39 +153,73 @@ class SeckillServiceImplTest {
         assertThat(response.status()).isEqualTo("FAILED");
         assertThat(response.message()).isEqualTo("Stock not enough");
         verify(stockCache, never()).refresh(anyLong(), anyLong(), any());
-        verify(messagePublisher, never()).publishSeckillOrderCreate(anyString(), anyString());
+        verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString());
     }
 
     @Test
-    void shouldReleaseDeductionRefreshCacheAndSaveFailureWhenMessagePublishFails() {
+    void shouldNotReleaseDeductionWhenOutboxEnqueueFails() {
         SeckillServiceImpl service = newService(60_000);
         SeckillActivity activity = new SeckillActivity(1L, "flash", Instant.now().minusSeconds(60), Instant.now().plusSeconds(60));
         SeckillSku sku = new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50);
         StockVersion deductedVersion = new StockVersion(49, 1L);
-        StockVersion releasedVersion = new StockVersion(50, 2L);
         when(repository.requireActivity(1L)).thenReturn(activity);
         when(repository.requireSku(1L, 1001L)).thenReturn(sku);
-        when(repository.recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), eq(101L), eq(1)))
-                .thenReturn(StockDeductionResult.success(deductedVersion));
-        when(repository.releaseDeduction(anyString(), eq("Order message publish failed")))
-                .thenReturn(new StockReleaseResult(
-                        new SeckillRepository.StockSnapshot("r1", 1L, 1001L, 101L, 1, "RELEASED"),
-                        releasedVersion));
-        doThrow(new RuntimeException("publish failed"))
-                .when(messagePublisher).publishSeckillOrderCreate(anyString(), anyString());
+        when(repository.recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), eq(101L), eq(1), any(Runnable.class)))
+                .thenAnswer(invocation -> {
+                    invocation.<Runnable>getArgument(6).run();
+                    return StockDeductionResult.success(deductedVersion);
+                });
+        doThrow(new RuntimeException("outbox failed"))
+                .when(messagePublisher).enqueueSeckillOrderCreate(anyString(), anyString());
 
         UserContext.set(new UserInfo(101L, "u101"));
 
+        assertThatThrownBy(() -> service.submit(1L, 1001L))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("outbox failed");
+
+        verify(repository, never()).releaseDeduction(anyString(), anyString());
+        verify(stockCache, never()).refresh(1L, 1001L, deductedVersion);
+    }
+
+    @Test
+    void shouldUseHotspotSentinelResourceForConfiguredHotspotSubmit() {
+        SeckillServiceImpl service = newService(60_000);
+        SeckillActivity activity = new SeckillActivity(1L, "flash", Instant.now().minusSeconds(60), Instant.now().plusSeconds(60));
+        SeckillSku sku = new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50);
+        StockVersion stockVersion = new StockVersion(49, 1L);
+        when(hotspotGuard.isHotspot(1L, 1001L)).thenReturn(true);
+        when(repository.requireActivity(1L)).thenReturn(activity);
+        when(repository.requireSku(1L, 1001L)).thenReturn(sku);
+        when(repository.recordDeduction(anyString(), eq(10L), eq(1L), eq(1001L), eq(101L), eq(1), any(Runnable.class)))
+                .thenAnswer(invocation -> {
+                    invocation.<Runnable>getArgument(6).run();
+                    return StockDeductionResult.success(stockVersion);
+                });
+
+        UserContext.set(new UserInfo(101L, "u101"));
         SeckillSubmitResponse response = service.submit(1L, 1001L);
 
-        assertThat(response.status()).isEqualTo("FAILED");
-        assertThat(response.message()).isEqualTo("Order message publish failed");
-        verify(stockCache).refresh(1L, 1001L, deductedVersion);
-        verify(stockCache).refresh(1L, 1001L, releasedVersion);
-        ArgumentCaptor<SeckillResult> resultCaptor = ArgumentCaptor.forClass(SeckillResult.class);
-        verify(repository).saveResult(resultCaptor.capture());
-        assertThat(resultCaptor.getValue().status()).isEqualTo("FAILED");
-        assertThat(resultCaptor.getValue().message()).isEqualTo("Order message publish failed");
+        assertThat(response.status()).isEqualTo("ACCEPTED");
+        verify(sentinelGuard).checkSubmit(true);
+        verify(hotspotGuard).acquire(1L, 1001L);
+    }
+
+    @Test
+    void shouldPrewarmMetadataAndTairStringStockCache() {
+        SeckillServiceImpl service = newService(60_000);
+        SeckillActivity activity = new SeckillActivity(1L, "flash", Instant.now().minusSeconds(60), Instant.now().plusSeconds(60));
+        SeckillSku sku = new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50);
+        StockVersion stockVersion = new StockVersion(50, 7L);
+        when(repository.requireActivity(1L)).thenReturn(activity);
+        when(repository.requireSku(1L, 1001L)).thenReturn(sku);
+        when(repository.stockVersion(10L)).thenReturn(stockVersion);
+
+        service.prewarm(1L, 1001L);
+
+        verify(repository).requireActivity(1L);
+        verify(repository).requireSku(1L, 1001L);
+        verify(stockCache).refresh(1L, 1001L, stockVersion);
     }
 
     private SeckillServiceImpl newService(long metadataCacheTtlMillis) {
@@ -189,11 +230,13 @@ class SeckillServiceImplTest {
                 repository,
                 stockCache,
                 sentinelGuard,
+                hotspotGuard,
                 messagePublisher,
                 new ObjectMapper(),
                 emptyRedissonProvider(),
                 properties,
-                new SimpleMeterRegistry()
+                new SimpleMeterRegistry(),
+                emptyTransactionManagerProvider()
         );
     }
 
@@ -216,6 +259,30 @@ class SeckillServiceImplTest {
 
             @Override
             public RedissonClient getObject() {
+                return null;
+            }
+        };
+    }
+
+    private ObjectProvider<PlatformTransactionManager> emptyTransactionManagerProvider() {
+        return new ObjectProvider<>() {
+            @Override
+            public PlatformTransactionManager getObject(Object... args) {
+                return null;
+            }
+
+            @Override
+            public PlatformTransactionManager getIfAvailable() {
+                return null;
+            }
+
+            @Override
+            public PlatformTransactionManager getIfUnique() {
+                return null;
+            }
+
+            @Override
+            public PlatformTransactionManager getObject() {
                 return null;
             }
         };

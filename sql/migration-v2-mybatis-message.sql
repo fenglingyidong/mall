@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS seckill_stock_snapshot (
     activity_id BIGINT NOT NULL,
     sku_id BIGINT NOT NULL,
     user_id BIGINT NOT NULL,
+    active_key BIGINT,
     quantity INT NOT NULL,
     status VARCHAR(32) NOT NULL,
     order_sn VARCHAR(64),
@@ -44,7 +45,8 @@ CREATE TABLE IF NOT EXISTS seckill_stock_snapshot (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     KEY idx_snapshot_user (activity_id, sku_id, user_id),
-    KEY idx_snapshot_status (status)
+    KEY idx_snapshot_status (status),
+    UNIQUE KEY uk_snapshot_active_user (activity_id, active_key)
 );
 
 CREATE TABLE IF NOT EXISTS mq_message (

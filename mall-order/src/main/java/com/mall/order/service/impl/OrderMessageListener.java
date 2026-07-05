@@ -1,6 +1,7 @@
 package com.mall.order.service.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mall.common.exception.BusinessException;
 import com.mall.common.util.JsonUtils;
 import com.mall.message.MessageNames;
 import com.mall.message.ReliableMessageRepository;
@@ -52,6 +53,10 @@ public class OrderMessageListener {
             markConsumed(message);
             channel.basicAck(deliveryTag, false);
         } catch (Exception exception) {
+            if (isRetryableSeckillOrderCreateFailure(exception)) {
+                channel.basicNack(deliveryTag, false, true);
+                return;
+            }
             if (request != null) {
                 publishSeckillResult(SeckillOrderResultMessage.failed(request.requestId(), exception.getMessage()));
             }
@@ -78,5 +83,14 @@ public class OrderMessageListener {
         if (messageId != null) {
             messageRepository.markConsumed(messageId);
         }
+    }
+
+    private boolean isRetryableSeckillOrderCreateFailure(Exception exception) {
+        if (exception instanceof BusinessException businessException) {
+            String message = businessException.getMessage();
+            return (businessException.code() == 404 && "Order not found".equals(message))
+                    || (businessException.code() == 409 && "Seckill message already consumed".equals(message));
+        }
+        return false;
     }
 }

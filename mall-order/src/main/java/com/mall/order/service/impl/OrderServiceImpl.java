@@ -124,6 +124,7 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public OrderInfo createSeckillOrder(SeckillOrderRequest request) {
         if (!consumeRecordRepository.markIfAbsent(request.requestId())) {
             return repository.findSeckillOrder(request.activityId(), request.userId())

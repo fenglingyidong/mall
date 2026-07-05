@@ -16,7 +16,6 @@ import com.mall.seckill.pojo.vo.SeckillActivityView;
 import com.mall.seckill.pojo.vo.SeckillResult;
 import com.mall.seckill.pojo.vo.SeckillSubmitResponse;
 import com.mall.seckill.pojo.vo.StockDeductionResult;
-import com.mall.seckill.pojo.vo.StockReleaseResult;
 import com.mall.seckill.service.SeckillService;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -24,6 +23,8 @@ import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.List;
@@ -44,11 +45,13 @@ public class SeckillServiceImpl implements SeckillService {
     private final SeckillRepository repository;
     private final SeckillStockCache stockCache;
     private final SentinelSeckillGuard sentinelGuard;
+    private final SeckillHotspotGuard hotspotGuard;
     private final ReliableMessagePublisher messagePublisher;
     private final ObjectMapper objectMapper;
     private final RedissonClient redissonClient;
     private final SeckillProperties properties;
     private final MeterRegistry meterRegistry;
+    private final TransactionTemplate submitTransactionTemplate;
     private final Timer submitTotalTimer;
     private final Timer submitSentinelTimer;
     private final Timer submitMetadataTimer;
@@ -62,19 +65,24 @@ public class SeckillServiceImpl implements SeckillService {
     public SeckillServiceImpl(SeckillRepository repository,
                               SeckillStockCache stockCache,
                               SentinelSeckillGuard sentinelGuard,
+                              SeckillHotspotGuard hotspotGuard,
                               ReliableMessagePublisher messagePublisher,
                               ObjectMapper objectMapper,
                               ObjectProvider<RedissonClient> redissonClient,
                               SeckillProperties properties,
-                              MeterRegistry meterRegistry) {
+                              MeterRegistry meterRegistry,
+                              ObjectProvider<PlatformTransactionManager> transactionManager) {
         this.repository = repository;
         this.stockCache = stockCache;
         this.sentinelGuard = sentinelGuard;
+        this.hotspotGuard = hotspotGuard;
         this.messagePublisher = messagePublisher;
         this.objectMapper = objectMapper;
         this.redissonClient = redissonClient.getIfAvailable();
         this.properties = properties;
         this.meterRegistry = meterRegistry;
+        PlatformTransactionManager manager = transactionManager.getIfAvailable();
+        this.submitTransactionTemplate = manager == null ? null : new TransactionTemplate(manager);
         this.submitTotalTimer = timer("seckill.submit.total", "Official seckill submit total latency");
         this.submitSentinelTimer = timer("seckill.submit.sentinel", "Official seckill submit Sentinel guard latency");
         this.submitMetadataTimer = timer("seckill.submit.metadata", "Official seckill submit metadata load latency");
@@ -93,14 +101,15 @@ public class SeckillServiceImpl implements SeckillService {
     public SeckillSubmitResponse submit(Long activityId, Long skuId) {
         Timer.Sample totalSample = Timer.start(meterRegistry);
         try {
-            submitSentinelTimer.record(sentinelGuard::checkSubmit);
+            boolean hotspot = hotspotGuard.isHotspot(activityId, skuId);
+            submitSentinelTimer.record(() -> sentinelGuard.checkSubmit(hotspot));
             Long userId = UserContext.currentUserIdOrDefault(1L);
             SubmitMetadata metadata = submitMetadataTimer.record(() -> loadMetadata(activityId, skuId));
             if (!metadata.activity().activeAt(Instant.now())) {
                 throw new BusinessException(400, "Seckill activity is not active");
             }
             if (redissonClient == null || !properties.getLock().isEnabled()) {
-                return doSubmit(activityId, skuId, userId, metadata.sku());
+                return doSubmitWithHotspotPermit(activityId, skuId, userId, metadata.sku());
             }
             RLock lock = redissonClient.getLock(lockKey(activityId, skuId, userId));
             boolean locked;
@@ -114,7 +123,7 @@ public class SeckillServiceImpl implements SeckillService {
                 throw new BusinessException(429, "Duplicate seckill submit");
             }
             try {
-                return doSubmit(activityId, skuId, userId, metadata.sku());
+                return doSubmitWithHotspotPermit(activityId, skuId, userId, metadata.sku());
             } finally {
                 unlockIfHeldByCurrentThread(lock);
             }
@@ -162,17 +171,6 @@ public class SeckillServiceImpl implements SeckillService {
         if (submitStockCacheSoldOutTimer.record(() -> stockCache.isSoldOut(activityId, skuId))) {
             return failedSubmit(requestId, STOCK_NOT_ENOUGH);
         }
-        StockDeductionResult deductionResult;
-        try {
-            deductionResult = repository.recordDeduction(requestId, sku.id(), activityId, skuId, userId, SECKILL_QUANTITY);
-        } catch (SeckillStockNotEnoughException exception) {
-            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
-        }
-        if (deductionResult.code() != DEDUCT_SUCCESS) {
-            return failedSubmit(requestId, deductionResult.code());
-        }
-        submitStockCacheRefreshTimer.record(() -> stockCache.refresh(activityId, skuId, deductionResult.stockVersion()));
-
         SeckillOrderRequest orderRequest = new SeckillOrderRequest(
                 requestId,
                 activityId,
@@ -182,18 +180,59 @@ public class SeckillServiceImpl implements SeckillService {
                 sku.price(),
                 SECKILL_QUANTITY
         );
+        StockDeductionResult deductionResult;
         try {
-            submitMqPublishTimer.record(() ->
-                    messagePublisher.publishSeckillOrderCreate(requestId, JsonUtils.toJson(objectMapper, orderRequest)));
-        } catch (RuntimeException exception) {
-            StockReleaseResult releaseResult = repository.releaseDeduction(requestId, "Order message publish failed");
-            if (releaseResult != null) {
-                submitStockCacheRefreshTimer.record(() -> stockCache.refresh(activityId, skuId, releaseResult.stockVersion()));
-            }
-            repository.saveResult(new SeckillResult(requestId, "FAILED", null, "Order message publish failed"));
-            return new SeckillSubmitResponse(requestId, "FAILED", "Order message publish failed");
+            deductionResult = recordDeductionAndEnqueueOrder(requestId, sku.id(), activityId, skuId, userId, orderRequest);
+        } catch (SeckillStockNotEnoughException exception) {
+            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
         }
+        if (deductionResult.code() != DEDUCT_SUCCESS) {
+            return failedSubmit(requestId, deductionResult.code());
+        }
+        submitStockCacheRefreshTimer.record(() -> stockCache.refresh(activityId, skuId, deductionResult.stockVersion()));
         return new SeckillSubmitResponse(requestId, "ACCEPTED", "Accepted");
+    }
+
+    private StockDeductionResult recordDeductionAndEnqueueOrder(String requestId,
+                                                                Long stockId,
+                                                                Long activityId,
+                                                                Long skuId,
+                                                                Long userId,
+                                                                SeckillOrderRequest orderRequest) {
+        if (submitTransactionTemplate == null) {
+            return doRecordDeductionAndEnqueueOrder(requestId, stockId, activityId, skuId, userId, orderRequest);
+        }
+        return submitTransactionTemplate.execute(status ->
+                doRecordDeductionAndEnqueueOrder(requestId, stockId, activityId, skuId, userId, orderRequest));
+    }
+
+    private StockDeductionResult doRecordDeductionAndEnqueueOrder(String requestId,
+                                                                  Long stockId,
+                                                                  Long activityId,
+                                                                  Long skuId,
+                                                                  Long userId,
+                                                                  SeckillOrderRequest orderRequest) {
+        StockDeductionResult deductionResult = repository.recordDeduction(
+                requestId,
+                stockId,
+                activityId,
+                skuId,
+                userId,
+                SECKILL_QUANTITY,
+                () -> submitMqPublishTimer.record(() ->
+                        messagePublisher.enqueueSeckillOrderCreate(requestId, JsonUtils.toJson(objectMapper, orderRequest))));
+        return deductionResult;
+    }
+
+    private SeckillSubmitResponse doSubmitWithHotspotPermit(Long activityId, Long skuId, Long userId, SeckillSku sku) {
+        try (SeckillHotspotGuard.HotspotPermit ignored = hotspotGuard.acquire(activityId, skuId)) {
+            return doSubmit(activityId, skuId, userId, sku);
+        }
+    }
+
+    public void prewarm(Long activityId, Long skuId) {
+        SubmitMetadata metadata = loadMetadata(activityId, skuId);
+        stockCache.refresh(activityId, skuId, repository.stockVersion(metadata.sku().id()));
     }
 
     private SeckillActivity requireActivity(Long activityId) {

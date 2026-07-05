@@ -21,6 +21,8 @@ public class SeckillStockSnapshotEntity {
 
     private Long userId;
 
+    private Long activeKey;
+
     private Integer quantity;
 
     private String status;

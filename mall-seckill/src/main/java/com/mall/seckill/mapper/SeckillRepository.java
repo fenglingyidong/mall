@@ -114,20 +114,30 @@ public class SeckillRepository {
         return toDomain(sku);
     }
 
-    public boolean hasActiveDeduction(Long activityId, Long skuId, Long userId) {
+    public boolean hasActiveDeduction(Long activityId, Long userId) {
         Long count = snapshotMapper.selectCount(Wrappers.<SeckillStockSnapshotEntity>lambdaQuery()
                 .eq(SeckillStockSnapshotEntity::getActivityId, activityId)
-                .eq(SeckillStockSnapshotEntity::getSkuId, skuId)
-                .eq(SeckillStockSnapshotEntity::getUserId, userId)
-                .in(SeckillStockSnapshotEntity::getStatus, "DEDUCTED", "CONFIRMED"));
+                .eq(SeckillStockSnapshotEntity::getActiveKey, userId));
         return count != null && count > 0;
     }
 
     @Transactional(rollbackFor = Exception.class)
     public StockDeductionResult recordDeduction(String requestId, Long stockId, Long activityId, Long skuId, Long userId, int quantity) {
+        return recordDeduction(requestId, stockId, activityId, skuId, userId, quantity, () -> {
+        });
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public StockDeductionResult recordDeduction(String requestId,
+                                                Long stockId,
+                                                Long activityId,
+                                                Long skuId,
+                                                Long userId,
+                                                int quantity,
+                                                Runnable beforeStockUpdate) {
         Timer.Sample totalSample = Timer.start(meterRegistry);
         try {
-            if (recordDeductionDuplicateTimer.record(() -> hasActiveDeduction(activityId, skuId, userId))) {
+            if (recordDeductionDuplicateTimer.record(() -> hasActiveDeduction(activityId, userId))) {
                 return StockDeductionResult.duplicate();
             }
             SeckillStockSnapshotEntity snapshot = new SeckillStockSnapshotEntity();
@@ -136,14 +146,20 @@ public class SeckillRepository {
             snapshot.setActivityId(activityId);
             snapshot.setSkuId(skuId);
             snapshot.setUserId(userId);
+            snapshot.setActiveKey(userId);
             snapshot.setQuantity(quantity);
             snapshot.setStatus("DEDUCTED");
             snapshot.setMessage("Stock deducted");
             LocalDateTime now = LocalDateTime.now();
             snapshot.setCreatedAt(now);
             snapshot.setUpdatedAt(now);
-            recordDeductionSnapshotInsertTimer.record(() -> snapshotMapper.insert(snapshot));
+            try {
+                recordDeductionSnapshotInsertTimer.record(() -> snapshotMapper.insert(snapshot));
+            } catch (DuplicateKeyException exception) {
+                return StockDeductionResult.duplicate();
+            }
 
+            beforeStockUpdate.run();
             if (recordDeductionStockUpdateTimer.record(() -> skuMapper.deductStockAndIncreaseVersionById(stockId, quantity)) == 0) {
                 throw new SeckillStockNotEnoughException();
             }
@@ -178,6 +194,10 @@ public class SeckillRepository {
         } finally {
             totalSample.stop(stockDeductUpdateOnlyTotalTimer);
         }
+    }
+
+    public StockVersion stockVersion(Long stockId) {
+        return skuMapper.selectStockVersionById(stockId);
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -220,6 +240,7 @@ public class SeckillRepository {
                         .eq(SeckillStockSnapshotEntity::getRequestId, requestId)
                         .eq(SeckillStockSnapshotEntity::getStatus, "DEDUCTED")
                         .set(SeckillStockSnapshotEntity::getStatus, "RELEASED")
+                        .set(SeckillStockSnapshotEntity::getActiveKey, null)
                         .set(SeckillStockSnapshotEntity::getMessage, message == null ? "Stock released" : message)
                         .set(SeckillStockSnapshotEntity::getUpdatedAt, now)));
                 if (updated > 0) {
@@ -229,6 +250,7 @@ public class SeckillRepository {
                     }
                     stockVersion = releaseDeductionStockSelectTimer.record(() -> skuMapper.selectStockVersionById(stockId));
                     snapshot.setStatus("RELEASED");
+                    snapshot.setActiveKey(null);
                     snapshot.setMessage(message == null ? "Stock released" : message);
                     snapshot.setUpdatedAt(now);
                 }

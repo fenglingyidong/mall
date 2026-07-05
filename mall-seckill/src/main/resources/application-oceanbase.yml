@@ -7,7 +7,7 @@ spring:
   data:
     redis:
       host: localhost
-      port: 6380
+      port: 6381
       timeout: 500ms
 
 mall:
@@ -16,3 +16,7 @@ mall:
       enabled: true
       fail-fast: true
       key-prefix: "seckill:stock-cache:"
+      repair:
+        enabled: true
+        fixed-delay: 60000
+        limit: 1000

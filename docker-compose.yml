@@ -32,6 +32,44 @@ services:
     ports:
       - "6380:6379"
 
+  tairstring:
+    image: tairmodule/tairstring:latest
+    container_name: mall-tairstring
+    ports:
+      - "6381:6379"
+
+  # oceanbase:
+  #   image: oceanbase/oceanbase-ce:latest
+  #   container_name: mall-oceanbase-ce
+  #   environment:
+  #     MODE: mini
+  #     OB_MEMORY_LIMIT: 6G
+  #     OB_DATAFILE_SIZE: 4G
+  #     OB_LOG_DISK_SIZE: 4G
+  #   ports:
+  #     - "2881:2881"
+  #     - "2882:2882"
+  oceanbase:
+    image: oceanbase/oceanbase-ce:latest
+    container_name: mall-oceanbase-ce
+    mem_limit: 18g
+    cpus: "6.0"
+    environment:
+      MODE: normal
+      OB_MEMORY_LIMIT: 12G
+      OB_SYSTEM_MEMORY: 2G
+      OB_TENANT_MINI_CPU: 4
+      OB_TENANT_MEMORY_SIZE: 10G
+      OB_DATAFILE_SIZE: 20G
+      OB_LOG_DISK_SIZE: 20G
+      OB_TENANT_PASSWORD: root
+    ports:
+      - "2881:2881"
+      - "2882:2882"
+    volumes:
+    - oceanbase-data:/root/ob
+    - oceanbase-conf:/root/.obd/cluster
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: mall-rabbitmq
@@ -48,15 +86,15 @@ services:
     environment:
       MODE: standalone
     ports:
-      - "8848:8848"
-      - "9848:9848"
-      - "9849:9849"
+      - "18848:8848"
+      - "19848:9848"
+      - "19849:9849"
 
   sentinel:
     image: bladex/sentinel-dashboard:1.8.8
     container_name: mall-sentinel
     ports:
-      - "8858:8858"
+      - "18858:8858"
 
   seata:
     image: seataio/seata-server
@@ -87,7 +125,7 @@ services:
     image: prom/prometheus:v2.55.1
     container_name: mall-prometheus
     ports:
-      - "9090:9090"
+      - "19090:9090"
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -113,3 +151,5 @@ services:
 volumes:
   prometheus-data:
   grafana-data:
+  oceanbase-data:
+  oceanbase-conf:

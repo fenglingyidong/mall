@@ -22,15 +22,15 @@
 
 ## 方案
 
-采用 `active` 标记加唯一键：
+采用 `active_key` 标记加唯一键：
 
-- `seckill_stock_snapshot` 新增 `active TINYINT NOT NULL DEFAULT 1`。
-- 新增唯一键 `uk_snapshot_active_user(activity_id, user_id, active)`。
-- 插入扣减快照时写 `active=1`。
-- 确认快照时保持 `active=1`。
-- 释放快照时更新为 `status='RELEASED', active=0`，并回补 `seckill_sku.stock/version`。
+- `seckill_stock_snapshot` 新增 `active_key BIGINT NULL`。
+- 新增唯一键 `uk_snapshot_active_user(activity_id, active_key)`。
+- 插入扣减快照时写 `active_key=user_id`。
+- 确认快照时保持 `active_key=user_id`。
+- 释放快照时更新为 `status='RELEASED', active_key=NULL`，并回补 `seckill_sku.stock/version`。
 
-选择该方案是因为 MySQL/OceanBase MySQL 模式不能稳定依赖部分唯一索引；`active` 可以表达“活跃资格唯一”，同时释放后不阻断重试。
+选择该方案是因为 MySQL/OceanBase MySQL 模式不能稳定依赖部分唯一索引；`active_key` 可以表达“活跃资格唯一”，同时利用唯一索引允许多个 `NULL` 的规则，让释放历史不阻断多次失败重试。
 
 ## 组件设计
 
@@ -39,15 +39,15 @@
 数据库变更：
 
 - 更新 `sql/schema.sql` 中 `seckill_stock_snapshot` 表结构。
-- 新增迁移脚本，将历史 `DEDUCTED/CONFIRMED` 设置为 `active=1`，其他状态设置为 `active=0`，再创建唯一键。
+- 新增迁移脚本，将历史 `DEDUCTED/CONFIRMED` 设置为 `active_key=user_id`，其他状态设置为 `active_key=NULL`，再创建唯一键。
 
 Repository 变更：
 
-- `hasActiveDeduction(activityId, userId)` 改为按 `active=1` 查询，不再把 `skuId` 放入口径。
+- `hasActiveDeduction(activityId, userId)` 改为按 `active_key=user_id` 查询，不再把 `skuId` 放入口径。
 - `recordDeduction()` 保留前置查询作为快速失败，但不能依赖它保证正确性。
 - `snapshotMapper.insert()` 捕获 `DuplicateKeyException`，遇到唯一键冲突返回 `StockDeductionResult.duplicate()`。
-- `releaseDeduction()` 更新快照时同时设置 `active=0`。
-- `confirmDeduction()` 保持 `active=1`。
+- `releaseDeduction()` 更新快照时同时设置 `active_key=NULL`。
+- `confirmDeduction()` 保持 `active_key=user_id`。
 
 ### 缓存修复闭环
 
@@ -93,9 +93,9 @@ Repository 变更：
 
 - Repository 单测：
   - 唯一键冲突返回 duplicate。
-  - 活跃重复检查按 `activity_id + user_id + active=1`。
-  - 释放快照时设置 `active=0` 并回补库存。
-  - 确认快照不释放 active。
+  - 活跃重复检查按 `activity_id + active_key=user_id`。
+  - 释放快照时设置 `active_key=NULL` 并回补库存。
+  - 确认快照不释放 `active_key`。
 - 缓存修复任务单测：
   - 启用后扫描库存并刷新缓存。
   - 修复单条异常不终止整轮。
