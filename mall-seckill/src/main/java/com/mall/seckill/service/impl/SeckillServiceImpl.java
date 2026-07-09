@@ -230,11 +230,11 @@ public class SeckillServiceImpl implements SeckillService {
                                            SeckillSku sku,
                                            Instant activityEndAt,
                                            String requestId) {
-        if (submitStockCacheSoldOutTimer.record(() -> stockCache.isSoldOut(activityId, skuId))) {
-            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
-        }
         if (asyncEntryGuardEnabled()) {
             return doSubmitWithAsyncEntry(requestId, activityId, skuId, userId, sku, activityEndAt);
+        }
+        if (submitStockCacheSoldOutTimer.record(() -> stockCache.isSoldOut(activityId, skuId))) {
+            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
         }
         if (reservationGuardEnabled()) {
             return doSubmitWithReservationGuard(requestId, activityId, skuId, userId, sku);

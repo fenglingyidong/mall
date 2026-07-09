@@ -42,6 +42,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -302,6 +303,45 @@ class SeckillServiceImplTest {
         verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString(), anyLong());
         verify(repository, never()).recordDeduction(anyString(), anyLong(), anyLong(), anyLong(), anyLong(), eq(1), any(Consumer.class));
         verify(repository, never()).saveResult(any());
+    }
+
+    @Test
+    void asyncEntrySubmitShouldIgnoreSoldOutStockCacheAndUseBucketFacts() {
+        SeckillServiceImpl service = newAsyncEntryService();
+        SeckillActivity activity = new SeckillActivity(1L, "flash", Instant.now().minusSeconds(60), Instant.now().plusSeconds(60));
+        SeckillSku sku = new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50);
+        StockVersion stockVersion = new StockVersion(49, 1L);
+        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 3L, 7L, 1L);
+        when(repository.requireActivity(1L)).thenReturn(activity);
+        when(repository.requireSku(1L, 1001L)).thenReturn(sku);
+        when(repository.isBucketModeEnabled()).thenReturn(true);
+        when(entryGuard.enabled()).thenReturn(true);
+        lenient().when(stockCache.isSoldOut(1L, 1001L)).thenReturn(true);
+        when(entryGuard.acquireRequest("client-r1"))
+                .thenReturn(new SeckillEntryGuard.RequestDecision(SeckillEntryGuard.RequestOutcome.ACQUIRED));
+        when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
+                .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
+        when(repository.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
+        when(repository.registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket))
+                .thenReturn(new SeckillRepository.SnapshotRegistration(
+                        SeckillRepository.SnapshotRegistrationOutcome.CREATED,
+                        new SeckillRepository.StockSnapshot("client-r1", 1L, 1001L, 101L, 1, "REGISTERED")));
+        when(repository.recordBucketDeductionFact("client-r1", 1L, 1001L, selectedBucket, 1))
+                .thenReturn(StockDeductionResult.success(stockVersion));
+
+        UserContext.set(new UserInfo(101L, "u101"));
+        SeckillSubmitResponse response = service.submit(1L, 1001L, "client-r1");
+
+        assertThat(response.status()).isEqualTo("PROCESSING");
+        assertThat(response.message()).isEqualTo("Processing");
+        verify(entryGuard).acquireRequest("client-r1");
+        verify(entryGuard).acquireBuyer(1L, 1001L, 101L, "client-r1", activity.endAt());
+        verify(repository).registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket);
+        verify(repository).recordBucketDeductionFact("client-r1", 1L, 1001L, selectedBucket, 1);
+        verify(stockCache, never()).isSoldOut(1L, 1001L);
+        verify(repository, never()).saveResult(any());
+        verify(guardRepository, never()).createOrLoad(anyString(), any());
+        verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString(), anyLong());
     }
 
     @Test
