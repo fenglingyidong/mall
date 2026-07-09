@@ -66,6 +66,8 @@ class SeckillCenterBucketLedgerConsumerTest {
         consumer.consume();
 
         verify(applier).apply(List.of(changeLog));
+        verify(changeLogMapper, never()).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 2);
+        verify(changeLogMapper, never()).selectByStatusForConsume(SeckillStockChangeLogStatus.OUTBOXING, 2);
     }
 
     @Test
@@ -106,6 +108,8 @@ class SeckillCenterBucketLedgerConsumerTest {
 
         verify(applier).apply(List.of(first));
         verify(applier).apply(List.of(second));
+        verify(changeLogMapper, never()).selectByStatusForConsumeByShard(3L, SeckillStockChangeLogStatus.NEW, 2);
+        verify(changeLogMapper, never()).selectByStatusForConsumeByShard(5L, SeckillStockChangeLogStatus.NEW, 2);
     }
 
     @Test
