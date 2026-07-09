@@ -5,7 +5,6 @@ import com.mall.seckill.mapper.SeckillRepository;
 import com.mall.seckill.mapper.SeckillStockChangeLogMapper;
 import com.mall.seckill.mapper.SeckillStockSnapshotMapper;
 import com.mall.seckill.pojo.entity.SeckillStockSnapshotEntity;
-import com.mall.seckill.pojo.vo.SeckillResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -89,7 +88,6 @@ public class SeckillSnapshotFactRepairJob {
             return;
         }
 
-        repository.markRegisteredSnapshotFailed(requestId, DEDUCTION_FACT_MISSING);
-        repository.saveResult(new SeckillResult(requestId, "FAILED", null, DEDUCTION_FACT_MISSING));
+        repository.failRegisteredSnapshotIfPresent(requestId, bucketShardKey, DEDUCTION_FACT_MISSING);
     }
 }

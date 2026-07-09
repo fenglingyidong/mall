@@ -327,6 +327,20 @@ public class SeckillRepository {
         snapshotMapper.releaseActiveKeyIfRegistered(requestId, truncate(message, MESSAGE_MAX_LENGTH));
     }
 
+    @Transactional(rollbackFor = Exception.class)
+    public boolean failRegisteredSnapshotIfPresent(String requestId, Long bucketShardKey, String message) {
+        if (requestId == null || requestId.isBlank() || bucketShardKey == null) {
+            return false;
+        }
+        String failureMessage = truncate(message, MESSAGE_MAX_LENGTH);
+        int updated = snapshotMapper.releaseActiveKeyIfRegisteredByShard(requestId, bucketShardKey, failureMessage);
+        if (updated <= 0) {
+            return false;
+        }
+        saveResult(new SeckillResult(requestId, "FAILED", null, failureMessage));
+        return true;
+    }
+
     private StockDeductionResult recordBucketDeduction(String requestId,
                                                        Long stockId,
                                                        Long activityId,

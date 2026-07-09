@@ -19,7 +19,12 @@ public interface SeckillStockSnapshotMapper extends BaseMapper<SeckillStockSnaps
     @Update("UPDATE seckill_stock_snapshot SET status = 'FAILED', active_key = NULL, message = #{message}, updated_at = NOW() WHERE request_id = #{requestId} AND status = 'REGISTERED'")
     int releaseActiveKeyIfRegistered(@Param("requestId") String requestId, @Param("message") String message);
 
-    @Select("SELECT * FROM seckill_stock_snapshot WHERE status = 'REGISTERED' AND created_at < #{before} ORDER BY created_at, request_id LIMIT #{limit}")
+    @Update("UPDATE seckill_stock_snapshot SET status = 'FAILED', active_key = NULL, message = #{message}, updated_at = NOW() WHERE request_id = #{requestId} AND bucket_shard_key = #{bucketShardKey} AND status = 'REGISTERED'")
+    int releaseActiveKeyIfRegisteredByShard(@Param("requestId") String requestId,
+                                            @Param("bucketShardKey") Long bucketShardKey,
+                                            @Param("message") String message);
+
+    @Select("SELECT * FROM seckill_stock_snapshot WHERE status = 'REGISTERED' AND bucket_shard_key IS NOT NULL AND created_at < #{before} ORDER BY created_at, request_id LIMIT #{limit}")
     List<SeckillStockSnapshotEntity> findRegisteredBefore(@Param("before") LocalDateTime before,
                                                           @Param("limit") Integer limit);
 }

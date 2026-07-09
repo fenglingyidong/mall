@@ -6,6 +6,7 @@ import com.mall.seckill.mapper.SeckillStockChangeLogMapper;
 import com.mall.seckill.mapper.SeckillStockSnapshotMapper;
 import com.mall.seckill.pojo.entity.SeckillStockSnapshotEntity;
 import com.mall.seckill.pojo.vo.SeckillResult;
+import org.apache.ibatis.annotations.Select;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -96,8 +97,8 @@ class SeckillSnapshotFactRepairJobTest {
 
         verify(changeLogMapper).countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 7L);
         verify(changeLogMapper, never()).countByRequestIdAndChangeType(anyString(), anyString());
-        verify(repository).markRegisteredSnapshotFailed("r1", MISSING_FACT_MESSAGE);
-        verify(repository).saveResult(new SeckillResult("r1", "FAILED", null, MISSING_FACT_MESSAGE));
+        verify(repository).failRegisteredSnapshotIfPresent("r1", 7L, MISSING_FACT_MESSAGE);
+        verify(repository, never()).saveResult(any(SeckillResult.class));
     }
 
     @Test
@@ -112,7 +113,8 @@ class SeckillSnapshotFactRepairJobTest {
 
         verify(changeLogMapper).countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 7L);
         verify(changeLogMapper, never()).countByRequestIdAndChangeType(anyString(), anyString());
-        verifyNoInteractions(repository);
+        verify(repository, never()).failRegisteredSnapshotIfPresent(anyString(), any(), anyString());
+        verify(repository, never()).saveResult(any(SeckillResult.class));
     }
 
     @Test
@@ -125,7 +127,36 @@ class SeckillSnapshotFactRepairJobTest {
 
         verify(changeLogMapper, never()).countByRequestIdAndChangeType(anyString(), anyString());
         verify(changeLogMapper, never()).countByRequestIdAndChangeTypeAndBucketShardKey(anyString(), anyString(), any());
-        verifyNoInteractions(repository);
+        verify(repository, never()).failRegisteredSnapshotIfPresent(anyString(), any(), anyString());
+        verify(repository, never()).saveResult(any(SeckillResult.class));
+    }
+
+    @Test
+    void shouldSkipSnapshotWithoutRequestId() {
+        SeckillStockSnapshotEntity snapshot = snapshot(null, 7L);
+        when(snapshotMapper.findRegisteredBefore(any(LocalDateTime.class), eq(200)))
+                .thenReturn(List.of(snapshot));
+
+        job().repair();
+
+        verify(changeLogMapper, never()).countByRequestIdAndChangeType(anyString(), anyString());
+        verify(changeLogMapper, never()).countByRequestIdAndChangeTypeAndBucketShardKey(anyString(), anyString(), any());
+        verify(repository, never()).failRegisteredSnapshotIfPresent(anyString(), any(), anyString());
+        verify(repository, never()).saveResult(any(SeckillResult.class));
+    }
+
+    @Test
+    void shouldSkipSnapshotWithBlankRequestId() {
+        SeckillStockSnapshotEntity snapshot = snapshot(" ", 7L);
+        when(snapshotMapper.findRegisteredBefore(any(LocalDateTime.class), eq(200)))
+                .thenReturn(List.of(snapshot));
+
+        job().repair();
+
+        verify(changeLogMapper, never()).countByRequestIdAndChangeType(anyString(), anyString());
+        verify(changeLogMapper, never()).countByRequestIdAndChangeTypeAndBucketShardKey(anyString(), anyString(), any());
+        verify(repository, never()).failRegisteredSnapshotIfPresent(anyString(), any(), anyString());
+        verify(repository, never()).saveResult(any(SeckillResult.class));
     }
 
     @Test
@@ -142,8 +173,22 @@ class SeckillSnapshotFactRepairJobTest {
         assertThatCode(() -> job().repair())
                 .doesNotThrowAnyException();
 
-        verify(repository).markRegisteredSnapshotFailed("r2", MISSING_FACT_MESSAGE);
-        verify(repository).saveResult(new SeckillResult("r2", "FAILED", null, MISSING_FACT_MESSAGE));
+        verify(repository).failRegisteredSnapshotIfPresent("r2", 8L, MISSING_FACT_MESSAGE);
+        verify(repository, never()).saveResult(any(SeckillResult.class));
+    }
+
+    @Test
+    void shouldFilterNullShardSnapshotsInRegisteredFinderSql() throws Exception {
+        Select select = SeckillStockSnapshotMapper.class
+                .getMethod("findRegisteredBefore", LocalDateTime.class, Integer.class)
+                .getAnnotation(Select.class);
+
+        assertThat(String.join(" ", select.value()))
+                .contains("status = 'REGISTERED'")
+                .contains("bucket_shard_key IS NOT NULL")
+                .contains("created_at < #{before}")
+                .contains("ORDER BY created_at, request_id")
+                .contains("LIMIT #{limit}");
     }
 
     private SeckillSnapshotFactRepairJob job() {

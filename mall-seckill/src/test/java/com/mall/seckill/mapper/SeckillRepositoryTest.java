@@ -42,6 +42,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -332,6 +333,55 @@ class SeckillRepositoryTest {
         repository.markRegisteredSnapshotFailed("r1", "failed");
 
         verify(snapshotMapper).releaseActiveKeyIfRegistered("r1", "failed");
+    }
+
+    @Test
+    void shouldFailRegisteredSnapshotOnCurrentShardAndSaveFailedResult() {
+        when(snapshotMapper.releaseActiveKeyIfRegisteredByShard("r1", 3L, "failed"))
+                .thenReturn(1);
+
+        boolean failed = repository.failRegisteredSnapshotIfPresent("r1", 3L, "failed");
+
+        assertThat(failed).isTrue();
+        verify(snapshotMapper).releaseActiveKeyIfRegisteredByShard("r1", 3L, "failed");
+        ArgumentCaptor<SeckillResultEntity> resultCaptor = ArgumentCaptor.forClass(SeckillResultEntity.class);
+        verify(resultMapper).insert(resultCaptor.capture());
+        assertThat(resultCaptor.getValue().getRequestId()).isEqualTo("r1");
+        assertThat(resultCaptor.getValue().getStatus()).isEqualTo("FAILED");
+        assertThat(resultCaptor.getValue().getOrderSn()).isNull();
+        assertThat(resultCaptor.getValue().getMessage()).isEqualTo("failed");
+    }
+
+    @Test
+    void shouldNotSaveFailedResultWhenRegisteredSnapshotShardUpdateMisses() {
+        when(snapshotMapper.releaseActiveKeyIfRegisteredByShard("r1", 3L, "failed"))
+                .thenReturn(0);
+
+        boolean failed = repository.failRegisteredSnapshotIfPresent("r1", 3L, "failed");
+
+        assertThat(failed).isFalse();
+        verify(snapshotMapper).releaseActiveKeyIfRegisteredByShard("r1", 3L, "failed");
+        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
+        verify(resultMapper, never()).updateById(any(SeckillResultEntity.class));
+    }
+
+    @Test
+    void shouldRollbackFailedSnapshotUpdateWhenFailedResultCannotBeSaved() {
+        RecordingTransactionManager transactionManager = new RecordingTransactionManager();
+        SeckillRepository transactionalRepository = transactionalProxy(repository, transactionManager);
+        when(snapshotMapper.releaseActiveKeyIfRegisteredByShard("r1", 3L, "failed"))
+                .thenReturn(1);
+        doThrow(new IllegalStateException("result save failed"))
+                .when(resultMapper).insert(any(SeckillResultEntity.class));
+
+        assertThatThrownBy(() -> transactionalRepository.failRegisteredSnapshotIfPresent("r1", 3L, "failed"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("result save failed");
+
+        assertThat(transactionManager.rolledBack).isTrue();
+        assertThat(transactionManager.committed).isFalse();
+        verify(snapshotMapper).releaseActiveKeyIfRegisteredByShard("r1", 3L, "failed");
+        verify(resultMapper).insert(any(SeckillResultEntity.class));
     }
 
     @Test
