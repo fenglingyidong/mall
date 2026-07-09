@@ -176,7 +176,7 @@ NEW -> OUTBOXING -> OUTBOXED
 | --- | --- | --- |
 | 提交入口 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillServiceImpl.java` | async entry hot path |
 | Redis 入口 guard | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillEntryGuard.java` | request/buyer key |
-| 库存事实 repository | `mall-seckill/src/main/java/com/mall/seckill/repository/SeckillRepository.java` | snapshot/change_log |
+| 库存事实 repository | `mall-seckill/src/main/java/com/mall/seckill/mapper/SeckillRepository.java` | snapshot/change_log |
 | outbox worker | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillOrderOutboxFromChangeLogService.java` | change_log -> order outbox |
 | center ledger | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillCenterBucketLedgerConsumer.java` | OUTBOXED -> APPLIED |
 | result listener | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillResultMessageListener.java` | 订单结果闭环 |
