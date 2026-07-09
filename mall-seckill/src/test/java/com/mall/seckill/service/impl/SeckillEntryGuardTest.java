@@ -6,16 +6,18 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
+import org.redisson.api.RScript;
 import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -136,17 +138,42 @@ class SeckillEntryGuardTest {
     }
 
     @Test
-    void shouldReleaseBuyerOnlyWhenCurrentRequestIdMatches() {
+    void shouldReleaseBuyerUseCompareScriptToAvoidDeletingDifferentRequestId() {
+        RedissonClient redisson = mock(RedissonClient.class);
+        RScript script = mock(RScript.class);
+        when(redisson.getScript()).thenReturn(script);
+        SeckillEntryGuard guard = new SeckillEntryGuard(provider(redisson), enabledProperties());
+        ArgumentCaptor<String> scriptCaptor = ArgumentCaptor.forClass(String.class);
+
+        guard.releaseBuyer(1L, 1001L, 101L, "r1");
+
+        verify(script).eval(eq(RScript.Mode.READ_WRITE),
+                scriptCaptor.capture(),
+                eq(RScript.ReturnType.INTEGER),
+                eq(List.of((Object) "seckill:entry:buyer:1:1001:101")),
+                eq("r1"));
+        assertThat(scriptCaptor.getValue())
+                .contains("redis.call('get', KEYS[1]) == ARGV[1]")
+                .contains("redis.call('del', KEYS[1])")
+                .contains("else");
+    }
+
+    @Test
+    void shouldReleaseBuyerWithAtomicCompareAndDeleteScript() {
         RedissonClient redisson = mock(RedissonClient.class);
         RBucket<String> bucket = bucket(redisson, "seckill:entry:buyer:1:1001:101");
+        RScript script = mock(RScript.class);
+        when(redisson.getScript()).thenReturn(script);
         SeckillEntryGuard guard = new SeckillEntryGuard(provider(redisson), enabledProperties());
-        when(bucket.get()).thenReturn("r1", "r0");
 
         guard.releaseBuyer(1L, 1001L, 101L, "r1");
-        verify(bucket).delete();
 
-        clearInvocations(bucket);
-        guard.releaseBuyer(1L, 1001L, 101L, "r1");
+        verify(script).eval(eq(RScript.Mode.READ_WRITE),
+                contains("redis.call('get', KEYS[1]) == ARGV[1]"),
+                eq(RScript.ReturnType.INTEGER),
+                eq(List.of((Object) "seckill:entry:buyer:1:1001:101")),
+                eq("r1"));
+        verify(bucket, never()).get();
         verify(bucket, never()).delete();
     }
 

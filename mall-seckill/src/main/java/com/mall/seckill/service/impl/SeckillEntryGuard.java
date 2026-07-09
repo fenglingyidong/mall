@@ -4,12 +4,14 @@ import com.mall.common.exception.BusinessException;
 import com.mall.seckill.config.SeckillProperties;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
+import org.redisson.api.RScript;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
@@ -18,6 +20,13 @@ public class SeckillEntryGuard {
 
     private static final String DEFAULT_KEY_PREFIX = "seckill:entry:";
     private static final String UNAVAILABLE_MESSAGE = "Seckill entry guard unavailable";
+    private static final String RELEASE_BUYER_SCRIPT = """
+            if redis.call('get', KEYS[1]) == ARGV[1] then
+                return redis.call('del', KEYS[1])
+            else
+                return 0
+            end
+            """;
 
     private final ObjectProvider<RedissonClient> redissonClientProvider;
     private final SeckillProperties properties;
@@ -62,10 +71,12 @@ public class SeckillEntryGuard {
         if (!enabled()) {
             return;
         }
-        RBucket<String> bucket = redissonClient().getBucket(buyerKey(activityId, skuId, userId));
-        if (Objects.equals(bucket.get(), requestId)) {
-            bucket.delete();
-        }
+        String key = buyerKey(activityId, skuId, userId);
+        redissonClient().getScript().eval(RScript.Mode.READ_WRITE,
+                RELEASE_BUYER_SCRIPT,
+                RScript.ReturnType.INTEGER,
+                List.of((Object) key),
+                requestId);
     }
 
     public boolean enabled() {
