@@ -280,7 +280,7 @@ class SeckillRepositoryTest {
         SeckillRepository bucketRepository = bucketRepository();
         StockVersion stockVersion = new StockVersion(48, 8L);
         SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(0L);
+        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(0L);
         when(bucketService.deductSelected(selectedBucket, "r1", 1L, 1001L, 1))
                 .thenReturn(new SeckillBucketService.BucketMutationResult(stockVersion, 1000L, selectedBucket));
 
@@ -288,6 +288,7 @@ class SeckillRepositoryTest {
 
         assertThat(result.code()).isZero();
         assertThat(result.stockVersion()).isEqualTo(stockVersion);
+        verify(changeLogMapper).countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L);
         verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
         verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
     }
@@ -296,11 +297,12 @@ class SeckillRepositoryTest {
     void shouldSkipBucketDeductionWhenDeductFactAlreadyExists() {
         SeckillRepository bucketRepository = bucketRepository();
         SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(1L);
+        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(1L);
 
         StockDeductionResult result = bucketRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
 
         assertThat(result.code()).isEqualTo(2);
+        verify(changeLogMapper).countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L);
         verify(bucketService, never()).deductSelected(any(), any(), any(), any(), anyInt());
         verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
         verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
@@ -312,7 +314,7 @@ class SeckillRepositoryTest {
         RecordingTransactionManager transactionManager = new RecordingTransactionManager();
         SeckillRepository transactionalRepository = transactionalProxy(bucketRepository, transactionManager);
         SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(0L);
+        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(0L);
         when(bucketService.deductSelected(selectedBucket, "r1", 1L, 1001L, 1))
                 .thenThrow(new DuplicateKeyException("duplicate deduct fact"));
 
@@ -387,13 +389,30 @@ class SeckillRepositoryTest {
         SeckillStockSnapshotEntity snapshot = snapshot("r1", "REGISTERED", 1);
         snapshot.setBucketShardKey(3L);
         when(snapshotMapper.selectOne(any())).thenReturn(snapshot);
-        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(1L);
+        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(1L);
         when(snapshotMapper.update(isNull(), any())).thenReturn(1);
 
         SeckillRepository.StockSnapshot result = bucketRepository.confirmDeduction("r1", 3L, "S1", "Order created");
 
         assertThat(result.status()).isEqualTo("CONFIRMED");
         verify(snapshotMapper).update(isNull(), any());
+        verify(skuMapper, never()).deductStock(anyLong(), anyLong(), any());
+        verify(skuMapper, never()).deductStockAndIncreaseVersionById(anyLong(), any());
+    }
+
+    @Test
+    void shouldNotConfirmRegisteredSnapshotWhenCurrentShardDeductChangeLogMissing() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillStockSnapshotEntity snapshot = snapshot("r1", "REGISTERED", 1);
+        snapshot.setBucketShardKey(3L);
+        when(snapshotMapper.selectOne(any())).thenReturn(snapshot);
+        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(0L);
+
+        SeckillRepository.StockSnapshot result = bucketRepository.confirmDeduction("r1", 3L, "S1", "Order created");
+
+        assertThat(result.status()).isEqualTo("REGISTERED");
+        verify(changeLogMapper).countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L);
+        verify(snapshotMapper, never()).update(isNull(), any());
         verify(skuMapper, never()).deductStock(anyLong(), anyLong(), any());
         verify(skuMapper, never()).deductStockAndIncreaseVersionById(anyLong(), any());
     }
@@ -419,6 +438,24 @@ class SeckillRepositoryTest {
         verify(skuMapper, never()).releaseStockAndIncreaseVersion(anyLong(), anyLong(), any());
         verify(skuMapper, never()).selectStockVersion(anyLong(), anyLong());
         verify(skuMapper, never()).releaseStock(anyLong(), anyLong(), any());
+    }
+
+    @Test
+    void shouldNotReleaseBucketStockWhenReleaseSnapshotUpdateFails() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillStockSnapshotEntity snapshot = snapshot("r1", "DEDUCTED", 1);
+        snapshot.setBucketId(99L);
+        snapshot.setBucketNo(3);
+        when(snapshotMapper.selectById("r1")).thenReturn(snapshot);
+        when(snapshotMapper.update(isNull(), any())).thenReturn(0);
+
+        StockReleaseResult result = bucketRepository.releaseDeduction("r1", "Order failed");
+
+        assertThat(result.snapshot().status()).isEqualTo("DEDUCTED");
+        assertThat(result.stockVersion()).isNull();
+        verify(bucketService, never()).release(any());
+        verify(skuMapper, never()).releaseStockAndIncreaseVersionById(anyLong(), any());
+        verify(skuMapper, never()).selectStockVersionById(anyLong());
     }
 
     @Test
@@ -450,7 +487,7 @@ class SeckillRepositoryTest {
         snapshot.setBucketShardKey(3L);
         StockVersion stockVersion = new StockVersion(50, 9L);
         when(snapshotMapper.selectOne(any())).thenReturn(snapshot);
-        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(1L);
+        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(1L);
         when(snapshotMapper.update(isNull(), any())).thenReturn(1);
         when(bucketService.release(snapshot)).thenReturn(stockVersion);
 
@@ -459,6 +496,27 @@ class SeckillRepositoryTest {
         assertThat(result.snapshot().status()).isEqualTo("RELEASED");
         assertThat(result.stockVersion()).isEqualTo(stockVersion);
         verify(bucketService).release(snapshot);
+        verify(skuMapper, never()).releaseStockAndIncreaseVersionById(anyLong(), any());
+        verify(skuMapper, never()).selectStockVersionById(anyLong());
+    }
+
+    @Test
+    void shouldNotReleaseRegisteredSnapshotWhenCurrentShardDeductChangeLogMissing() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillStockSnapshotEntity snapshot = snapshot("r1", "REGISTERED", 1);
+        snapshot.setBucketId(99L);
+        snapshot.setBucketNo(3);
+        snapshot.setBucketShardKey(3L);
+        when(snapshotMapper.selectOne(any())).thenReturn(snapshot);
+        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(0L);
+
+        StockReleaseResult result = bucketRepository.releaseDeduction("r1", 3L, "Order failed");
+
+        assertThat(result.snapshot().status()).isEqualTo("REGISTERED");
+        assertThat(result.stockVersion()).isNull();
+        verify(changeLogMapper).countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L);
+        verify(snapshotMapper, never()).update(isNull(), any());
+        verify(bucketService, never()).release(any());
         verify(skuMapper, never()).releaseStockAndIncreaseVersionById(anyLong(), any());
         verify(skuMapper, never()).selectStockVersionById(anyLong());
     }

@@ -310,7 +310,7 @@ public class SeckillRepository {
                                                           Long skuId,
                                                           SeckillBucketService.SelectedBucket selectedBucket,
                                                           int quantity) {
-        if (hasDeductChangeLog(requestId)) {
+        if (hasDeductChangeLog(requestId, selectedBucket.bucketShardKey())) {
             return StockDeductionResult.duplicate();
         }
         try {
@@ -447,7 +447,8 @@ public class SeckillRepository {
         }
         String currentStatus = snapshot.getStatus();
         boolean confirmable = "DEDUCTED".equals(currentStatus)
-                || ("REGISTERED".equals(currentStatus) && hasDeductChangeLog(requestId));
+                || ("REGISTERED".equals(currentStatus)
+                && hasDeductChangeLog(requestId, snapshot.getBucketShardKey()));
         if (confirmable) {
             LocalDateTime now = LocalDateTime.now();
             String resultMessage = messageOrDefault(message, "Order created");
@@ -496,7 +497,7 @@ public class SeckillRepository {
             boolean releasable = releasableStatus.equals(currentStatus)
                     || ("DEDUCTED".equals(releasableStatus)
                     && "REGISTERED".equals(currentStatus)
-                    && hasDeductChangeLog(requestId));
+                    && hasDeductChangeLog(requestId, snapshot.getBucketShardKey()));
             if (releasable) {
                 LocalDateTime now = LocalDateTime.now();
                 String resultMessage = messageOrDefault(message, "Stock released");
@@ -637,8 +638,10 @@ public class SeckillRepository {
         return bucketService != null && properties.getBucket().isEnabled();
     }
 
-    private boolean hasDeductChangeLog(String requestId) {
-        return changeLogMapper != null && changeLogMapper.countByRequestIdAndChangeType(requestId, "DEDUCT") > 0;
+    private boolean hasDeductChangeLog(String requestId, Long bucketShardKey) {
+        return changeLogMapper != null
+                && bucketShardKey != null
+                && changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey(requestId, "DEDUCT", bucketShardKey) > 0;
     }
 
     private void markCurrentTransactionRollbackOnly() {
