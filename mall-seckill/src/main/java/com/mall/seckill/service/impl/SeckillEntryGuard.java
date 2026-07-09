@@ -1,0 +1,133 @@
+package com.mall.seckill.service.impl;
+
+import com.mall.common.exception.BusinessException;
+import com.mall.seckill.config.SeckillProperties;
+import org.redisson.api.RBucket;
+import org.redisson.api.RedissonClient;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Objects;
+import java.util.concurrent.TimeUnit;
+
+@Component
+public class SeckillEntryGuard {
+
+    private static final String DEFAULT_KEY_PREFIX = "seckill:entry:";
+    private static final String UNAVAILABLE_MESSAGE = "Seckill entry guard unavailable";
+
+    private final ObjectProvider<RedissonClient> redissonClientProvider;
+    private final SeckillProperties properties;
+
+    public SeckillEntryGuard(ObjectProvider<RedissonClient> redissonClientProvider,
+                             SeckillProperties properties) {
+        this.redissonClientProvider = redissonClientProvider;
+        this.properties = properties == null ? new SeckillProperties() : properties;
+    }
+
+    public RequestDecision acquireRequest(String requestId) {
+        if (!enabled()) {
+            return new RequestDecision(RequestOutcome.ACQUIRED);
+        }
+        RBucket<String> bucket = redissonClient().getBucket(requestKey(requestId));
+        boolean acquired = bucket.trySet("1", requestTtlSeconds(), TimeUnit.SECONDS);
+        return new RequestDecision(acquired ? RequestOutcome.ACQUIRED : RequestOutcome.DUPLICATE);
+    }
+
+    public BuyerDecision acquireBuyer(Long activityId,
+                                      Long skuId,
+                                      Long userId,
+                                      String requestId,
+                                      Instant activityEndAt) {
+        if (!enabled()) {
+            return new BuyerDecision(BuyerOutcome.ACQUIRED, null);
+        }
+        RBucket<String> bucket = redissonClient().getBucket(buyerKey(activityId, skuId, userId));
+        boolean acquired = bucket.trySet(requestId, buyerTtlSeconds(activityEndAt), TimeUnit.SECONDS);
+        if (acquired) {
+            return new BuyerDecision(BuyerOutcome.ACQUIRED, null);
+        }
+
+        String existingRequestId = bucket.get();
+        if (Objects.equals(existingRequestId, requestId)) {
+            return new BuyerDecision(BuyerOutcome.SAME_REQUEST, existingRequestId);
+        }
+        return new BuyerDecision(BuyerOutcome.DUPLICATE_BUYER, existingRequestId);
+    }
+
+    public void releaseBuyer(Long activityId, Long skuId, Long userId, String requestId) {
+        if (!enabled()) {
+            return;
+        }
+        RBucket<String> bucket = redissonClient().getBucket(buyerKey(activityId, skuId, userId));
+        if (Objects.equals(bucket.get(), requestId)) {
+            bucket.delete();
+        }
+    }
+
+    public boolean enabled() {
+        return entryGuardProperties().isEnabled();
+    }
+
+    private RedissonClient redissonClient() {
+        RedissonClient redissonClient = redissonClientProvider == null ? null : redissonClientProvider.getIfAvailable();
+        if (redissonClient == null) {
+            throw new BusinessException(UNAVAILABLE_MESSAGE);
+        }
+        return redissonClient;
+    }
+
+    private String requestKey(String requestId) {
+        return keyPrefix() + "req:" + requestId;
+    }
+
+    private String buyerKey(Long activityId, Long skuId, Long userId) {
+        return keyPrefix() + "buyer:" + activityId + ":" + skuId + ":" + userId;
+    }
+
+    private String keyPrefix() {
+        String keyPrefix = entryGuardProperties().getKeyPrefix();
+        return StringUtils.hasText(keyPrefix) ? keyPrefix : DEFAULT_KEY_PREFIX;
+    }
+
+    private long requestTtlSeconds() {
+        return Math.max(1, entryGuardProperties().getRequestTtlSeconds());
+    }
+
+    private long buyerTtlSeconds(Instant activityEndAt) {
+        long bufferSeconds = entryGuardProperties().getBuyerTtlBufferSeconds();
+        long ttlSeconds = bufferSeconds;
+        if (activityEndAt != null) {
+            long secondsUntilEnd = Duration.between(Instant.now(), activityEndAt).getSeconds();
+            if (secondsUntilEnd > 0) {
+                ttlSeconds = secondsUntilEnd + bufferSeconds;
+            }
+        }
+        return Math.max(1, ttlSeconds);
+    }
+
+    private SeckillProperties.EntryGuard entryGuardProperties() {
+        SeckillProperties.EntryGuard entryGuard = properties.getEntryGuard();
+        return entryGuard == null ? new SeckillProperties.EntryGuard() : entryGuard;
+    }
+
+    public record RequestDecision(RequestOutcome outcome) {
+    }
+
+    public record BuyerDecision(BuyerOutcome outcome, String existingRequestId) {
+    }
+
+    public enum RequestOutcome {
+        ACQUIRED,
+        DUPLICATE
+    }
+
+    public enum BuyerOutcome {
+        ACQUIRED,
+        SAME_REQUEST,
+        DUPLICATE_BUYER
+    }
+}
