@@ -47,8 +47,23 @@ public class MessageCompensationJob {
     }
 
     private void markDispatchingTimedOut() {
+        if (!bucketShardKeys.isEmpty()) {
+            bucketShardKeys.forEach(bucketShardKey -> markDispatchingTimedOut(bucketShardKey));
+            return;
+        }
+        markDispatchingTimedOut(null);
+    }
+
+    private void markDispatchingTimedOut(Long bucketShardKey) {
         try {
-            repository.markDispatchingTimedOut(Instant.now().minusSeconds(dispatchingTimeoutSeconds), batchSize);
+            if (bucketShardKey == null) {
+                repository.markDispatchingTimedOut(Instant.now().minusSeconds(dispatchingTimeoutSeconds), batchSize);
+                return;
+            }
+            repository.markDispatchingTimedOut(
+                    Instant.now().minusSeconds(dispatchingTimeoutSeconds),
+                    bucketShardKey,
+                    batchSize);
         } catch (RuntimeException exception) {
             log.warn("Reliable message dispatching timeout mark failed; continue NEW/FAILED compensation", exception);
         }

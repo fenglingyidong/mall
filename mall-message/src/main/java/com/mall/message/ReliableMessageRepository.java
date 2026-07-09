@@ -87,15 +87,23 @@ public class ReliableMessageRepository {
     }
 
     public int markDispatchingTimedOut(Instant timeoutBefore, int limit) {
+        return markDispatchingTimedOut(timeoutBefore, null, limit);
+    }
+
+    public int markDispatchingTimedOut(Instant timeoutBefore, Long bucketShardKey, int limit) {
         int safeLimit = Math.max(1, limit);
-        return messageMapper.update(null, Wrappers.<MqMessageEntity>lambdaUpdate()
+        var wrapper = Wrappers.<MqMessageEntity>lambdaUpdate()
                 .eq(MqMessageEntity::getStatus, MessageStatus.DISPATCHING.name())
                 .lt(MqMessageEntity::getUpdatedAt, toLocalDateTime(timeoutBefore))
                 .set(MqMessageEntity::getStatus, MessageStatus.FAILED.name())
                 .set(MqMessageEntity::getErrorType, MessageErrorType.TIMEOUT.name())
                 .set(MqMessageEntity::getErrorMessage, "Reliable message dispatch timeout")
                 .set(MqMessageEntity::getUpdatedAt, LocalDateTime.now())
-                .last("LIMIT " + safeLimit));
+                .last("LIMIT " + safeLimit);
+        if (bucketShardKey != null) {
+            wrapper.eq(MqMessageEntity::getBucketShardKey, bucketShardKey);
+        }
+        return messageMapper.update(null, wrapper);
     }
 
     public void markConsumed(String messageId) {

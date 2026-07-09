@@ -45,7 +45,8 @@ class MessageCompensationJobTest {
 
         job.compensate();
 
-        verify(repository).markDispatchingTimedOut(any(Instant.class), eq(40));
+        verify(repository).markDispatchingTimedOut(any(Instant.class), eq(1L), eq(40));
+        verify(repository).markDispatchingTimedOut(any(Instant.class), eq(3L), eq(40));
         verify(repository).findNeedCompensation(1L, 40);
         verify(repository).findNeedCompensation(3L, 40);
         verify(publisher).resend(message);

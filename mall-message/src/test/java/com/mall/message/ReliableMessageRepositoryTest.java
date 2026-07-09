@@ -80,6 +80,20 @@ class ReliableMessageRepositoryTest {
     }
 
     @Test
+    void markDispatchingTimedOutByShardShouldRouteWithBucketShardKey() {
+        ReliableMessageRepository repository = new ReliableMessageRepository(messageMapper);
+
+        repository.markDispatchingTimedOut(java.time.Instant.now(), 3L, 25);
+
+        Wrapper<MqMessageEntity> wrapper = capturedUpdateWrapper();
+        assertThat(wrapper.getSqlSegment())
+                .contains("bucket_shard_key")
+                .contains("status")
+                .contains("updated_at")
+                .contains("LIMIT 25");
+    }
+
+    @Test
     void existsByBusinessKeyAndRoutingKeyShouldFilterBusinessRoutingAndShard() {
         ReliableMessageRepository repository = new ReliableMessageRepository(messageMapper);
         when(messageMapper.selectCount(org.mockito.ArgumentMatchers.any())).thenReturn(1L);
