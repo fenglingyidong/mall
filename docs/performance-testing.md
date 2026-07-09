@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | P0 | `GET /api/product/search` | 高频商品搜索，观察 MySQL 查询、索引和网关吞吐 |
 | P0 | `GET /api/product/{skuId}` | 高频商品详情，观察缓存、聚合调用和库存读取 |
-| P0 | `POST /api/seckill/{activityId}/{skuId}` | 秒杀热点提交，观察限流、Redis Lua、锁和 MQ |
+| P0 | `POST /api/seckill/{activityId}/{skuId}` | 秒杀热点提交，观察 Sentinel、reservation guard、分桶扣减、可靠消息和 MQ |
 | P0 | `GET /api/seckill/result/{requestId}` | 秒杀结果轮询，观察异步结果查询压力 |
 | P1 | `POST /api/cart/items` | 加购写接口，观察登录态、购物车落库和缓存同步 |
 | P1 | `GET /api/cart` | 购物车读取，观察用户隔离和读缓存 |
@@ -20,7 +20,7 @@
 | P2 | `POST /api/order/{orderSn}/pay` | 支付状态流转，适合幂等和状态机测试 |
 | P2 | `POST /api/order/{orderSn}/cancel` | 取消订单，观察库存释放和关单 |
 
-RAGAgent 的 `POST /api/shopping/chat` 不建议直接做大并发压测，因为它依赖外部 DashScope，波动和成本都高。若要测，只建议先把大模型调用隔离掉，压自己的商品检索和工具调用层。
+RAGAgent 后续接入走现有 `POST /api/react`，不再新增 `/api/shopping/chat` 兼容入口。该链路不建议直接做大并发压测，因为它依赖外部 DashScope，波动和成本都高。若要测，只建议先把大模型调用隔离掉，压自己的商品检索和 MCP 工具调用层。
 
 ## 推荐顺序
 
@@ -192,7 +192,7 @@ GET /api/seckill/result/${requestId}
 | 商品详情 | 100 | 10 分钟 | 看缓存和聚合调用 |
 | 加购 + 查购物车 | 50 | 5 分钟 | 看购物车稳定性 |
 | 普通下单链路 | 30 | 5 分钟 | 看 Seata、库存和订单一致性 |
-| 秒杀提交 | 300 | 3 分钟 | 看限流、Redis、MQ 和超卖风险 |
+| 秒杀提交 | 300 | 3 分钟 | 看限流、guard 幂等、分桶扣减、MQ 和超卖风险 |
 | 秒杀结果轮询 | 300 | 5 分钟 | 看异步结果延迟和查询压力 |
 
 ## 断言
@@ -205,7 +205,7 @@ GET /api/seckill/result/${requestId}
 响应不包含 500
 ```
 
-商品搜索可以断言有返回结果，商品详情可以断言 `price` 和 `stock` 存在。秒杀场景里，成功、排队中、库存不足、重复提交、限流都属于可接受业务结果，HTTP 500 不可接受。
+商品搜索可以断言有返回结果，商品详情可以断言 `price` 和 `stock` 存在。秒杀场景里，成功、排队中、库存不足、重复提交、重复购买、限流都属于可接受业务结果，HTTP 500 不可接受；同一个 `X-Request-Id` 重复提交应返回同一笔 reservation 的结果，不应重复扣减。
 
 ## 命令行
 
@@ -233,7 +233,7 @@ jmeter -n -t mall-pressure.jmx -l result.jtl -e -o report
   "-Jport=8105"
 ```
 
-脚本会为每次请求生成独立 `X-User-Id`，避免把持续压测误测成同一用户重复提交。脚本内置业务断言：响应 JSON 的 `code != 0` 会被 JMeter 标记为失败，因此 Sentinel `429` 不会再混入 HTTP 200 成功样本。
+脚本会为每次请求生成独立 `X-User-Id` 和请求幂等号，避免把持续压测误测成同一用户重复提交。脚本内置业务断言：响应 JSON 的 `code != 0` 会被 JMeter 标记为失败，因此 Sentinel `429` 不会再混入 HTTP 200 成功样本。
 
 ### 阶段一一键验收
 
@@ -279,7 +279,7 @@ docker compose up -d oceanbase tairstring
 - `seckill_stock_snapshot.CONFIRMED = 预期成功数`，`DEDUCTED = 0`。
 - `seckill_result.SUCCESS = 预期成功数`，`FAILED = 0`。
 - `seckill_order = 预期成功数`。
-- 秒杀创建和结果消息没有未消费残留。
+- 秒杀创建和结果消息没有 `NEW` / `DISPATCHING` / `FAILED` 待投递或待补偿残留。
 - TairString 缓存值和版本与数据库一致。
 
 ### 阶段二一键验收
@@ -342,7 +342,7 @@ powershell -ExecutionPolicy Bypass -File docs/scripts/verify-seckill-stage2.ps1 
 - 主链路场景 JMeter 失败数为 `0`。
 - 主链路库存、版本、快照、结果、订单、MQ 消息状态和 TairString `stock/version` 全部对齐。
 - 热点场景没有 HTTP 500。
-- 热点场景不超卖，`stock = 初始库存 - CONFIRMED`，`DEDUCTED = 0`，秒杀 MQ 消息没有未消费残留。
+- 热点场景不超卖，`stock = 初始库存 - CONFIRMED`，`DEDUCTED = 0`，秒杀 MQ 消息没有 `NEW` / `DISPATCHING` / `FAILED` 待投递或待补偿残留。
 - 设置 `-MinHotspotFailures` 时，热点场景失败数必须达到该阈值，用于证明热点 QPS/并发保护确实生效。
 
 ### 2026-07-03 阶段二正式秒杀接口阶梯压测

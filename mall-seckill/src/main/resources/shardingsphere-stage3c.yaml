@@ -1,0 +1,81 @@
+mode:
+  type: Standalone
+  repository:
+    type: Memory
+
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://localhost:2881/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://localhost:2881/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root@test
+    password:
+    maxPoolSize: 80
+    minPoolSize: 20
+    customPoolProps:
+      maximumPoolSize: 80
+      minimumIdle: 20
+  ds_1:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://localhost:3881/test?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://localhost:3881/test?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root@test
+    password:
+    maxPoolSize: 80
+    minPoolSize: 20
+    customPoolProps:
+      maximumPoolSize: 80
+      minimumIdle: 20
+
+rules:
+  - !SHARDING
+    tables:
+      seckill_stock_bucket:
+        actualDataNodes: ds_$->{0..1}.seckill_stock_bucket
+        databaseStrategy:
+          standard:
+            shardingColumn: shard_key
+            shardingAlgorithmName: seckill_bucket_database_inline
+      seckill_stock_snapshot:
+        actualDataNodes: ds_$->{0..1}.seckill_stock_snapshot
+        databaseStrategy:
+          standard:
+            shardingColumn: bucket_shard_key
+            shardingAlgorithmName: seckill_bucket_shard_key_inline
+      seckill_stock_change_log:
+        actualDataNodes: ds_$->{0..1}.seckill_stock_change_log
+        databaseStrategy:
+          standard:
+            shardingColumn: bucket_shard_key
+            shardingAlgorithmName: seckill_bucket_shard_key_inline
+      mq_message:
+        actualDataNodes: ds_$->{0..1}.mq_message
+        databaseStrategy:
+          standard:
+            shardingColumn: bucket_shard_key
+            shardingAlgorithmName: seckill_bucket_shard_key_inline
+    shardingAlgorithms:
+      seckill_bucket_database_inline:
+        type: INLINE
+        props:
+          algorithm-expression: ds_$->{shard_key % 2}
+      seckill_bucket_shard_key_inline:
+        type: INLINE
+        props:
+          algorithm-expression: ds_$->{bucket_shard_key % 2}
+  - !BROADCAST
+    tables:
+      - seckill_bucket_config
+  - !SINGLE
+    tables:
+      - ds_0.seckill_activity
+      - ds_0.seckill_sku
+      - ds_0.seckill_result
+      - ds_0.seckill_reservation_guard
+      - ds_0.seckill_result_retry
+    defaultDataSource: ds_0
+
+props:
+  sql-show: false

@@ -39,5 +39,8 @@ class SeckillHotspotGuardTest {
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("Hotspot seckill busy");
         }
+        try (SeckillHotspotGuard.HotspotPermit ignored = guard.acquire(1L, 1001L)) {
+            assertThat(ignored).isNotNull();
+        }
     }
 }

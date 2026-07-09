@@ -188,7 +188,7 @@ function Wait-SeckillLedger {
         Start-Sleep -Seconds 2
         $confirmed = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM seckill_stock_snapshot WHERE status = 'CONFIRMED'")
         $deducted = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM seckill_stock_snapshot WHERE status = 'DEDUCTED'")
-        $openMessages = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM mq_message WHERE routing_key IN ('seckill.order.create', 'seckill.order.result') AND status <> 'CONSUMED'")
+        $openMessages = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM mq_message WHERE routing_key IN ('seckill.order.create', 'seckill.order.result') AND status IN ('NEW', 'DISPATCHING', 'FAILED')")
         if ($confirmed -ge $MinimumConfirmed -and $deducted -eq 0 -and $openMessages -eq 0) {
             break
         }
@@ -207,7 +207,7 @@ function Read-Ledger {
         successResults = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM seckill_result WHERE status = 'SUCCESS'")
         failedResults = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM seckill_result WHERE status = 'FAILED'")
         seckillOrders = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM seckill_order WHERE activity_id = $ActivityId")
-        openSeckillMessages = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM mq_message WHERE routing_key IN ('seckill.order.create', 'seckill.order.result') AND status <> 'CONSUMED'")
+        openSeckillMessages = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM mq_message WHERE routing_key IN ('seckill.order.create', 'seckill.order.result') AND status IN ('NEW', 'DISPATCHING', 'FAILED')")
     }
 }
 
@@ -254,7 +254,7 @@ $mainChecks = [ordered]@{
     deductedCleared = ($mainLedger.deducted -eq 0)
     results = ($mainLedger.successResults -eq $mainExpectedSuccess -and $mainLedger.failedResults -eq 0)
     orders = ($mainLedger.seckillOrders -eq $mainExpectedSuccess)
-    seckillMessagesConsumed = ($mainLedger.openSeckillMessages -eq 0)
+    seckillMessagesDrained = ($mainLedger.openSeckillMessages -eq 0)
     cache = ($mainCache.value -eq $mainLedger.stock -and $mainCache.version -eq $mainLedger.version)
 }
 
@@ -265,7 +265,7 @@ $hotspotChecks = [ordered]@{
     confirmedWithinRequests = ($hotspotLedger.confirmed -le $hotspotRequests)
     stockMatchesConfirmed = ($hotspotLedger.stock -eq ($Stock - $hotspotLedger.confirmed))
     deductedCleared = ($hotspotLedger.deducted -eq 0)
-    seckillMessagesConsumed = ($hotspotLedger.openSeckillMessages -eq 0)
+    seckillMessagesDrained = ($hotspotLedger.openSeckillMessages -eq 0)
     cache = ($hotspotCache.value -eq $hotspotLedger.stock -and $hotspotCache.version -eq $hotspotLedger.version)
 }
 

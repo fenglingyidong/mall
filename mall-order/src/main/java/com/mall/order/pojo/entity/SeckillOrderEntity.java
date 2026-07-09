@@ -14,6 +14,8 @@ public class SeckillOrderEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
+    private String reservationId;
+
     private Long activityId;
 
     private Long userId;
@@ -21,6 +23,8 @@ public class SeckillOrderEntity {
     private Long skuId;
 
     private String orderSn;
+
+    private Long bucketShardKey;
 
     private LocalDateTime createdAt;
 }

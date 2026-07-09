@@ -1,6 +1,7 @@
 package com.mall.seckill.cache;
 
 import com.mall.seckill.config.SeckillProperties;
+import com.mall.seckill.mapper.SeckillRepository;
 import com.mall.seckill.mapper.SeckillSkuMapper;
 import com.mall.seckill.pojo.entity.SeckillSkuEntity;
 import com.mall.seckill.pojo.vo.StockVersion;
@@ -25,6 +26,9 @@ class SeckillStockCacheRepairJobTest {
 
     @Mock
     private SeckillStockCache stockCache;
+
+    @Mock
+    private SeckillRepository repository;
 
     private SeckillProperties properties;
     private SeckillStockCacheRepairJob repairJob;
@@ -60,6 +64,20 @@ class SeckillStockCacheRepairJobTest {
 
         verify(stockCache).refresh(1L, 1001L, new StockVersion(9, 3L));
         verify(stockCache).refresh(1L, 1002L, new StockVersion(0, 12L));
+    }
+
+    @Test
+    void shouldUseBucketAggregateStockVersionWhenBucketModeEnabled() {
+        properties.getBucket().setEnabled(true);
+        repairJob = new SeckillStockCacheRepairJob(skuMapper, stockCache, properties, repository);
+        SeckillSkuEntity sku = sku(1L, 1L, 1001L, 9, 3L);
+        StockVersion aggregate = new StockVersion(8, 12L);
+        when(skuMapper.selectList(any())).thenReturn(List.of(sku));
+        when(repository.stockVersion(1L, 1L, 1001L)).thenReturn(aggregate);
+
+        repairJob.repair();
+
+        verify(stockCache).refresh(1L, 1001L, aggregate);
     }
 
     private SeckillSkuEntity sku(Long id, Long activityId, Long skuId, Integer stock, Long version) {

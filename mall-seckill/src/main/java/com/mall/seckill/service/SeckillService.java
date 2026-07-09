@@ -12,5 +12,7 @@ public interface SeckillService {
 
     SeckillSubmitResponse submit(Long activityId, Long skuId);
 
+    SeckillSubmitResponse submit(Long activityId, Long skuId, String requestId);
+
     SeckillResult result(String requestId);
 }

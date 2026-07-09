@@ -9,6 +9,7 @@ public record ReliableMessage(
         String routingKey,
         String businessKey,
         String payload,
+        Long bucketShardKey,
         Long delayMillis,
         Instant createdAt
 ) {
@@ -18,6 +19,16 @@ public record ReliableMessage(
     }
 
     public static ReliableMessage of(String exchange, String routingKey, String businessKey, String payload, Long delayMillis) {
-        return new ReliableMessage(UUID.randomUUID().toString(), exchange, routingKey, businessKey, payload, delayMillis, Instant.now());
+        return of(exchange, routingKey, businessKey, payload, null, delayMillis);
+    }
+
+    public static ReliableMessage of(String exchange,
+                                     String routingKey,
+                                     String businessKey,
+                                     String payload,
+                                     Long bucketShardKey,
+                                     Long delayMillis) {
+        return new ReliableMessage(UUID.randomUUID().toString(), exchange, routingKey, businessKey, payload,
+                bucketShardKey, delayMillis, Instant.now());
     }
 }

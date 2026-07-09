@@ -83,6 +83,12 @@ java -jar target/mall-seckill-0.0.1-SNAPSHOT.jar --spring.profiles.active=oceanb
 
 `application-oceanbase.yml` 使用 OceanBase CE MySQL 模式连接串，并把 Redis 端口指向本地 TairString 兼容实例。阶段一的库存事实源是 `seckill_sku.stock/version`；TairString 只承担读缓存和已售罄快速失败，不再作为扣减事实源。
 
+## 阶段三分桶实验模式
+
+`mall.seckill.bucket.enabled=false` 是默认值，正式链路仍走单行 `seckill_sku` 扣减。开启分桶实验前需要先执行 `sql/migration-v9-seckill-stage3-buckets.sql`，并通过 `SeckillBucketInitializer.initializeFromSku(activityId, skuId, bucketCount)` 把现有秒杀 SKU 库存拆成中心桶和业务分桶。
+
+开启后，提交事务会把快照记录到具体 `bucket_id/bucket_no`，扣减 `seckill_stock_bucket.saleable_quantity`，订单失败时按快照回补原分桶。当前 Stage 3A 是单库可演示闭环，不包含异步中心桶汇总、调拨和真实分片路由，不承诺 8w QPS。
+
 ## 锁配置
 
 `mall.seckill.lock.lease-millis` 控制 Redisson 锁租约：

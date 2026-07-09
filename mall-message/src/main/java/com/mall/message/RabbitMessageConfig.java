@@ -32,6 +32,42 @@ public class RabbitMessageConfig {
     @Value("${spring.rabbitmq.listener.simple.prefetch:1}")
     private int listenerPrefetch;
 
+    @Value("${mall.message.listener.seckill-order-create.concurrency:${spring.rabbitmq.listener.simple.concurrency:1}}")
+    private int seckillOrderCreateListenerConcurrency;
+
+    @Value("${mall.message.listener.seckill-order-create.max-concurrency:${spring.rabbitmq.listener.simple.max-concurrency:1}}")
+    private int seckillOrderCreateListenerMaxConcurrency;
+
+    @Value("${mall.message.listener.seckill-order-create.prefetch:${spring.rabbitmq.listener.simple.prefetch:1}}")
+    private int seckillOrderCreateListenerPrefetch;
+
+    @Value("${mall.message.listener.seckill-order-result.concurrency:${spring.rabbitmq.listener.simple.concurrency:1}}")
+    private int seckillOrderResultListenerConcurrency;
+
+    @Value("${mall.message.listener.seckill-order-result.max-concurrency:${spring.rabbitmq.listener.simple.max-concurrency:1}}")
+    private int seckillOrderResultListenerMaxConcurrency;
+
+    @Value("${mall.message.listener.seckill-order-result.prefetch:${spring.rabbitmq.listener.simple.prefetch:1}}")
+    private int seckillOrderResultListenerPrefetch;
+
+    @Value("${mall.message.listener.order-close.concurrency:${spring.rabbitmq.listener.simple.concurrency:1}}")
+    private int orderCloseListenerConcurrency;
+
+    @Value("${mall.message.listener.order-close.max-concurrency:${spring.rabbitmq.listener.simple.max-concurrency:1}}")
+    private int orderCloseListenerMaxConcurrency;
+
+    @Value("${mall.message.listener.order-close.prefetch:${spring.rabbitmq.listener.simple.prefetch:1}}")
+    private int orderCloseListenerPrefetch;
+
+    @Value("${mall.message.dispatch.core-pool-size:2}")
+    private int dispatchCorePoolSize;
+
+    @Value("${mall.message.dispatch.max-pool-size:8}")
+    private int dispatchMaxPoolSize;
+
+    @Value("${mall.message.dispatch.queue-capacity:10000}")
+    private int dispatchQueueCapacity;
+
     @Bean
     public DirectExchange mallExchange() {
         return new DirectExchange(MessageNames.MALL_EXCHANGE, true, false);
@@ -90,6 +126,14 @@ public class RabbitMessageConfig {
     }
 
     @Bean
+    public Queue seckillOrderResultRetryDelayQueue() {
+        return new Queue(MessageNames.SECKILL_ORDER_RESULT_RETRY_DELAY_QUEUE, true, false, false, Map.of(
+                "x-dead-letter-exchange", MessageNames.MALL_EXCHANGE,
+                "x-dead-letter-routing-key", MessageNames.SECKILL_ORDER_RESULT_ROUTING_KEY
+        ));
+    }
+
+    @Bean
     public Queue seckillOrderResultDeadLetterQueue() {
         return new Queue(MessageNames.SECKILL_ORDER_RESULT_DLQ, true);
     }
@@ -143,6 +187,14 @@ public class RabbitMessageConfig {
     }
 
     @Bean
+    public Binding seckillOrderResultRetryDelayBinding(@Qualifier("seckillOrderResultRetryDelayQueue") Queue seckillOrderResultRetryDelayQueue,
+                                                       @Qualifier("mallDelayExchange") DirectExchange mallDelayExchange) {
+        return BindingBuilder.bind(seckillOrderResultRetryDelayQueue)
+                .to(mallDelayExchange)
+                .with(MessageNames.SECKILL_ORDER_RESULT_RETRY_DELAY_ROUTING_KEY);
+    }
+
+    @Bean
     public Binding seckillOrderResultDeadLetterBinding(@Qualifier("seckillOrderResultDeadLetterQueue") Queue seckillOrderResultDeadLetterQueue,
                                                        @Qualifier("mallDeadLetterExchange") DirectExchange mallDeadLetterExchange) {
         return BindingBuilder.bind(seckillOrderResultDeadLetterQueue)
@@ -167,9 +219,9 @@ public class RabbitMessageConfig {
     public ThreadPoolTaskExecutor reliableMessageDispatchExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setThreadNamePrefix("reliable-message-dispatch-");
-        executor.setCorePoolSize(2);
-        executor.setMaxPoolSize(8);
-        executor.setQueueCapacity(10000);
+        executor.setCorePoolSize(Math.max(1, dispatchCorePoolSize));
+        executor.setMaxPoolSize(Math.max(Math.max(1, dispatchCorePoolSize), dispatchMaxPoolSize));
+        executor.setQueueCapacity(Math.max(1, dispatchQueueCapacity));
         executor.initialize();
         return executor;
     }
@@ -177,14 +229,50 @@ public class RabbitMessageConfig {
     @Bean
     public SimpleRabbitListenerContainerFactory rabbitListenerContainerFactory(ConnectionFactory connectionFactory,
                                                                               MessageConverter messageConverter) {
+        return listenerContainerFactory(connectionFactory, messageConverter,
+                listenerConcurrency, listenerMaxConcurrency, listenerPrefetch);
+    }
+
+    @Bean
+    public SimpleRabbitListenerContainerFactory orderCloseRabbitListenerContainerFactory(ConnectionFactory connectionFactory,
+                                                                                       MessageConverter messageConverter) {
+        return listenerContainerFactory(connectionFactory, messageConverter,
+                orderCloseListenerConcurrency,
+                orderCloseListenerMaxConcurrency,
+                orderCloseListenerPrefetch);
+    }
+
+    @Bean
+    public SimpleRabbitListenerContainerFactory seckillOrderCreateRabbitListenerContainerFactory(ConnectionFactory connectionFactory,
+                                                                                                MessageConverter messageConverter) {
+        return listenerContainerFactory(connectionFactory, messageConverter,
+                seckillOrderCreateListenerConcurrency,
+                seckillOrderCreateListenerMaxConcurrency,
+                seckillOrderCreateListenerPrefetch);
+    }
+
+    @Bean
+    public SimpleRabbitListenerContainerFactory seckillOrderResultRabbitListenerContainerFactory(ConnectionFactory connectionFactory,
+                                                                                                MessageConverter messageConverter) {
+        return listenerContainerFactory(connectionFactory, messageConverter,
+                seckillOrderResultListenerConcurrency,
+                seckillOrderResultListenerMaxConcurrency,
+                seckillOrderResultListenerPrefetch);
+    }
+
+    private SimpleRabbitListenerContainerFactory listenerContainerFactory(ConnectionFactory connectionFactory,
+                                                                         MessageConverter messageConverter,
+                                                                         int concurrency,
+                                                                         int maxConcurrency,
+                                                                         int prefetch) {
         SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
         factory.setConnectionFactory(connectionFactory);
         factory.setMessageConverter(messageConverter);
         factory.setAcknowledgeMode(AcknowledgeMode.MANUAL);
         factory.setDefaultRequeueRejected(false);
-        factory.setConcurrentConsumers(Math.max(1, listenerConcurrency));
-        factory.setMaxConcurrentConsumers(Math.max(Math.max(1, listenerConcurrency), listenerMaxConcurrency));
-        factory.setPrefetchCount(Math.max(1, listenerPrefetch));
+        factory.setConcurrentConsumers(Math.max(1, concurrency));
+        factory.setMaxConcurrentConsumers(Math.max(Math.max(1, concurrency), maxConcurrency));
+        factory.setPrefetchCount(Math.max(1, prefetch));
         return factory;
     }
 }

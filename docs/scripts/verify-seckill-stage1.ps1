@@ -174,7 +174,7 @@ $released = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM seckill_stock_sn
 $successResults = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM seckill_result WHERE status = 'SUCCESS'")
 $failedResults = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM seckill_result WHERE status = 'FAILED'")
 $orders = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM seckill_order WHERE activity_id = $ActivityId")
-$seckillMqOpen = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM mq_message WHERE routing_key IN ('seckill.order.create', 'seckill.order.result') AND status <> 'CONSUMED'")
+$seckillMqOpen = [int](Invoke-MysqlScalar -Sql "SELECT COUNT(*) FROM mq_message WHERE routing_key IN ('seckill.order.create', 'seckill.order.result') AND status IN ('NEW', 'DISPATCHING', 'FAILED')")
 $jmeterFailures = Read-JMeterFailures -Path $jtlPath
 $cache = Read-TairStringValue -Key $cacheKey
 
@@ -187,7 +187,7 @@ $checks = [ordered]@{
     deductedCleared = ($deducted -eq 0)
     results = ($successResults -eq $ExpectedSuccess -and $failedResults -eq 0)
     orders = ($orders -eq $ExpectedSuccess)
-    seckillMessagesConsumed = ($seckillMqOpen -eq 0)
+    seckillMessagesDrained = ($seckillMqOpen -eq 0)
     cache = ($cache.value -eq $dbStock -and $cache.version -eq $dbVersion)
 }
 $passed = -not ($checks.Values -contains $false)

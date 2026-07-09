@@ -65,18 +65,54 @@ public class OrderRepository {
         return Optional.of(require(seckillOrder.getOrderSn()));
     }
 
+    public Optional<OrderInfo> findBySource(String source, String sourceId) {
+        if (sourceId == null || sourceId.isBlank()) {
+            return Optional.empty();
+        }
+        OrderInfoEntity entity = orderInfoMapper.selectOne(Wrappers.<OrderInfoEntity>lambdaQuery()
+                .eq(OrderInfoEntity::getSource, source)
+                .eq(OrderInfoEntity::getSourceId, sourceId));
+        if (entity == null) {
+            return Optional.empty();
+        }
+        return Optional.of(toDomain(entity, findItems(entity.getOrderSn())));
+    }
+
     public void bindSeckill(Long activityId, Long userId, Long skuId, String orderSn) {
+        bindSeckill(null, activityId, userId, skuId, orderSn, null);
+    }
+
+    public void bindSeckill(String reservationId,
+                            Long activityId,
+                            Long userId,
+                            Long skuId,
+                            String orderSn,
+                            Long bucketShardKey) {
         SeckillOrderEntity entity = new SeckillOrderEntity();
+        entity.setReservationId(reservationId);
         entity.setActivityId(activityId);
         entity.setUserId(userId);
         entity.setSkuId(skuId);
         entity.setOrderSn(orderSn);
+        entity.setBucketShardKey(bucketShardKey);
         entity.setCreatedAt(LocalDateTime.now());
         try {
             seckillOrderMapper.insert(entity);
         } catch (DuplicateKeyException exception) {
             throw new BusinessException(409, "Duplicate seckill purchase");
         }
+    }
+
+    public Optional<SeckillReservationBinding> findSeckillBinding(String orderSn) {
+        SeckillOrderEntity entity = seckillOrderMapper.selectOne(Wrappers.<SeckillOrderEntity>lambdaQuery()
+                .eq(SeckillOrderEntity::getOrderSn, orderSn));
+        if (entity == null || entity.getReservationId() == null) {
+            return Optional.empty();
+        }
+        return Optional.of(new SeckillReservationBinding(
+                entity.getReservationId(),
+                entity.getOrderSn(),
+                entity.getBucketShardKey()));
     }
 
     public OrderInfo transition(String orderSn, OrderStatus from, OrderStatus to) {
@@ -109,6 +145,7 @@ public class OrderRepository {
         entity.setStatus(order.status().name());
         entity.setTotalAmount(order.totalAmount());
         entity.setSource(order.source());
+        entity.setSourceId(order.sourceId());
         entity.setCreatedAt(toLocalDateTime(order.createdAt()));
         entity.setUpdatedAt(toLocalDateTime(order.updatedAt()));
         return entity;
@@ -133,6 +170,7 @@ public class OrderRepository {
                 entity.getTotalAmount(),
                 items,
                 entity.getSource(),
+                entity.getSourceId(),
                 toInstant(entity.getCreatedAt()),
                 toInstant(entity.getUpdatedAt())
         );
@@ -148,5 +186,10 @@ public class OrderRepository {
 
     private Instant toInstant(LocalDateTime value) {
         return value == null ? Instant.now() : value.atZone(ZONE_ID).toInstant();
+    }
+
+    public record SeckillReservationBinding(String reservationId,
+                                            String orderSn,
+                                            Long bucketShardKey) {
     }
 }

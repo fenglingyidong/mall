@@ -1,12 +1,17 @@
 package com.mall.seckill.mapper;
 
 import com.mall.seckill.pojo.entity.SeckillStockSnapshotEntity;
+import com.mall.seckill.pojo.entity.SeckillStockBucketEntity;
+import com.mall.seckill.pojo.entity.SeckillBucketConfigEntity;
+import com.mall.seckill.pojo.entity.SeckillStockChangeLogEntity;
 import com.mall.seckill.pojo.entity.SeckillSkuEntity;
 import com.mall.seckill.pojo.entity.SeckillResultEntity;
+import com.mall.seckill.config.SeckillProperties;
 import com.mall.seckill.pojo.vo.StockDeductProbeResponse;
 import com.mall.seckill.pojo.vo.StockDeductionResult;
 import com.mall.seckill.pojo.vo.StockReleaseResult;
 import com.mall.seckill.pojo.vo.StockVersion;
+import com.mall.seckill.service.impl.SeckillBucketService;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.metadata.TableInfo;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
@@ -51,6 +56,9 @@ class SeckillRepositoryTest {
     @Mock
     private SeckillStockSnapshotMapper snapshotMapper;
 
+    @Mock
+    private SeckillBucketService bucketService;
+
     private SeckillRepository repository;
 
     @BeforeAll
@@ -58,6 +66,9 @@ class SeckillRepositoryTest {
         MybatisConfiguration configuration = new MybatisConfiguration();
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(configuration, ""), SeckillStockSnapshotEntity.class);
         TableInfoHelper.initTableInfo(new MapperBuilderAssistant(configuration, ""), SeckillSkuEntity.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(configuration, ""), SeckillStockBucketEntity.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(configuration, ""), SeckillBucketConfigEntity.class);
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(configuration, ""), SeckillStockChangeLogEntity.class);
     }
 
     @BeforeEach
@@ -148,6 +159,62 @@ class SeckillRepositoryTest {
     }
 
     @Test
+    void shouldRecordBucketDeductionWhenBucketModeEnabled() {
+        SeckillRepository bucketRepository = bucketRepository();
+        StockVersion stockVersion = new StockVersion(48, 8L);
+        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        when(snapshotMapper.selectCount(any())).thenReturn(0L);
+        when(bucketService.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
+        when(bucketService.deduct(selectedBucket, "r1", 1L, 1001L, 1))
+                .thenReturn(new SeckillBucketService.BucketMutationResult(stockVersion, 1000L, selectedBucket));
+        when(snapshotMapper.updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class))).thenReturn(1);
+
+        StockDeductionResult result = bucketRepository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1);
+
+        assertThat(result.code()).isZero();
+        assertThat(result.stockVersion()).isEqualTo(stockVersion);
+        ArgumentCaptor<SeckillStockSnapshotEntity> snapshotCaptor = ArgumentCaptor.forClass(SeckillStockSnapshotEntity.class);
+        verify(snapshotMapper).insert(snapshotCaptor.capture());
+        SeckillStockSnapshotEntity snapshot = snapshotCaptor.getValue();
+        assertThat(snapshot.getStockId()).isEqualTo(10L);
+        assertThat(snapshot.getBucketId()).isEqualTo(99L);
+        assertThat(snapshot.getBucketNo()).isEqualTo(3);
+        assertThat(snapshot.getBucketShardKey()).isEqualTo(3L);
+        assertThat(snapshot.getStrategyVersion()).isEqualTo(7L);
+        verify(bucketService).deduct(selectedBucket, "r1", 1L, 1001L, 1);
+        verify(snapshotMapper).updateBucketDeductionByRequestAndShardKey(snapshot);
+        verify(skuMapper, never()).deductStockAndIncreaseVersionById(anyLong(), any());
+        ArgumentCaptor<SeckillResultEntity> resultCaptor = ArgumentCaptor.forClass(SeckillResultEntity.class);
+        verify(resultMapper).insert(resultCaptor.capture());
+        assertThat(resultCaptor.getValue().getStatus()).isEqualTo("PROCESSING");
+    }
+
+    @Test
+    void shouldUpdateBucketSnapshotToActualDeductedBucketWhenRetryMovesBucket() {
+        SeckillRepository bucketRepository = bucketRepository();
+        StockVersion stockVersion = new StockVersion(48, 8L);
+        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        SeckillBucketService.SelectedBucket actualBucket = new SeckillBucketService.SelectedBucket(100L, 4, 7L, 1L);
+        when(snapshotMapper.selectCount(any())).thenReturn(0L);
+        when(bucketService.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
+        when(bucketService.deduct(selectedBucket, "r1", 1L, 1001L, 1))
+                .thenReturn(new SeckillBucketService.BucketMutationResult(stockVersion, 1000L, actualBucket));
+        when(snapshotMapper.updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class))).thenReturn(1);
+
+        StockDeductionResult result = bucketRepository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1);
+
+        assertThat(result.code()).isZero();
+        ArgumentCaptor<SeckillStockSnapshotEntity> updateCaptor = ArgumentCaptor.forClass(SeckillStockSnapshotEntity.class);
+        verify(snapshotMapper).updateBucketDeductionByRequestAndShardKey(updateCaptor.capture());
+        SeckillStockSnapshotEntity updated = updateCaptor.getValue();
+        assertThat(updated.getBucketId()).isEqualTo(100L);
+        assertThat(updated.getBucketNo()).isEqualTo(4);
+        assertThat(updated.getBucketShardKey()).isEqualTo(4L);
+        assertThat(updated.getStrategyVersion()).isEqualTo(7L);
+        assertThat(updated.getChangeId()).isEqualTo(1000L);
+    }
+
+    @Test
     void shouldDeductStockOnlyForLoadTestWithoutLedgerWrites() {
         StockVersion stockVersion = new StockVersion(999, 2L);
         when(skuMapper.deductStockAndIncreaseVersionById(10L, 1)).thenReturn(1);
@@ -220,6 +287,26 @@ class SeckillRepositoryTest {
     }
 
     @Test
+    void shouldReleaseBucketDeductionWhenBucketModeEnabled() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillStockSnapshotEntity snapshot = snapshot("r1", "DEDUCTED", 1);
+        snapshot.setBucketId(99L);
+        snapshot.setBucketNo(3);
+        StockVersion stockVersion = new StockVersion(50, 9L);
+        when(snapshotMapper.selectById("r1")).thenReturn(snapshot);
+        when(snapshotMapper.update(isNull(), any())).thenReturn(1);
+        when(bucketService.release(snapshot)).thenReturn(stockVersion);
+
+        StockReleaseResult result = bucketRepository.releaseDeduction("r1", "Order failed");
+
+        assertThat(result.snapshot().status()).isEqualTo("RELEASED");
+        assertThat(result.stockVersion()).isEqualTo(stockVersion);
+        verify(bucketService).release(snapshot);
+        verify(skuMapper, never()).releaseStockAndIncreaseVersionById(anyLong(), any());
+        verify(skuMapper, never()).selectStockVersionById(anyLong());
+    }
+
+    @Test
     void shouldMapSnapshotActiveKeyField() {
         TableInfo tableInfo = TableInfoHelper.getTableInfo(SeckillStockSnapshotEntity.class);
 
@@ -227,6 +314,29 @@ class SeckillRepositoryTest {
                 .anySatisfy(field -> {
                     assertThat(field.getProperty()).isEqualTo("activeKey");
                     assertThat(field.getColumn()).isEqualTo("active_key");
+                });
+    }
+
+    @Test
+    void shouldMapSnapshotBucketFields() {
+        TableInfo tableInfo = TableInfoHelper.getTableInfo(SeckillStockSnapshotEntity.class);
+
+        assertThat(tableInfo.getFieldList())
+                .anySatisfy(field -> {
+                    assertThat(field.getProperty()).isEqualTo("bucketId");
+                    assertThat(field.getColumn()).isEqualTo("bucket_id");
+                })
+                .anySatisfy(field -> {
+                    assertThat(field.getProperty()).isEqualTo("bucketNo");
+                    assertThat(field.getColumn()).isEqualTo("bucket_no");
+                })
+                .anySatisfy(field -> {
+                    assertThat(field.getProperty()).isEqualTo("bucketShardKey");
+                    assertThat(field.getColumn()).isEqualTo("bucket_shard_key");
+                })
+                .anySatisfy(field -> {
+                    assertThat(field.getProperty()).isEqualTo("strategyVersion");
+                    assertThat(field.getColumn()).isEqualTo("strategy_version");
                 });
     }
 
@@ -276,5 +386,18 @@ class SeckillRepositoryTest {
         snapshot.setQuantity(quantity);
         snapshot.setStatus(status);
         return snapshot;
+    }
+
+    private SeckillRepository bucketRepository() {
+        SeckillProperties properties = new SeckillProperties();
+        properties.getBucket().setEnabled(true);
+        return new SeckillRepository(
+                activityMapper,
+                skuMapper,
+                resultMapper,
+                snapshotMapper,
+                bucketService,
+                properties,
+                new SimpleMeterRegistry());
     }
 }

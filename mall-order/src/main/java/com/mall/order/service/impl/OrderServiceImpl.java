@@ -1,12 +1,15 @@
 package com.mall.order.service.impl;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mall.common.api.ApiResponse;
 import com.mall.common.context.UserContext;
 import com.mall.common.exception.BusinessException;
 import com.mall.common.model.OrderStatus;
+import com.mall.common.util.JsonUtils;
 import com.mall.common.util.OrderNoGenerator;
 import com.mall.message.ConsumeRecordRepository;
 import com.mall.message.ReliableMessagePublisher;
+import com.mall.message.SeckillOrderResultMessage;
 import com.mall.order.config.OrderProperties;
 import com.mall.order.mapper.CartClient;
 import com.mall.order.mapper.OrderRepository;
@@ -38,19 +41,22 @@ public class OrderServiceImpl implements OrderService {
     private final ReliableMessagePublisher messagePublisher;
     private final ConsumeRecordRepository consumeRecordRepository;
     private final OrderProperties properties;
+    private final ObjectMapper objectMapper;
 
     public OrderServiceImpl(CartClient cartClient,
                             ProductClient productClient,
                             OrderRepository repository,
                             ReliableMessagePublisher messagePublisher,
                             ConsumeRecordRepository consumeRecordRepository,
-                            OrderProperties properties) {
+                            OrderProperties properties,
+                            ObjectMapper objectMapper) {
         this.cartClient = cartClient;
         this.productClient = productClient;
         this.repository = repository;
         this.messagePublisher = messagePublisher;
         this.consumeRecordRepository = consumeRecordRepository;
         this.properties = properties;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -114,11 +120,16 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public OrderInfo closeIfCreated(String orderSn) {
         OrderInfo before = repository.require(orderSn);
         OrderInfo updated = repository.transition(orderSn, OrderStatus.CREATED, OrderStatus.CLOSED);
-        if (before.status() == OrderStatus.CREATED && updated.status() == OrderStatus.CLOSED && shouldReleaseProductStock(updated)) {
-            releaseStock(updated);
+        if (before.status() == OrderStatus.CREATED && updated.status() == OrderStatus.CLOSED) {
+            if (shouldReleaseProductStock(updated)) {
+                releaseStock(updated);
+            } else if (isSeckillOrder(updated)) {
+                enqueueSeckillOrderCanceled(updated);
+            }
         }
         return updated;
     }
@@ -126,11 +137,12 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public OrderInfo createSeckillOrder(SeckillOrderRequest request) {
-        if (!consumeRecordRepository.markIfAbsent(request.requestId())) {
-            return repository.findSeckillOrder(request.activityId(), request.userId())
+        String reservationId = request.reservationId();
+        if (!consumeRecordRepository.markIfAbsent(reservationId)) {
+            return repository.findBySource("SECKILL", reservationId)
                     .orElseThrow(() -> new BusinessException(409, "Seckill message already consumed"));
         }
-        return repository.findSeckillOrder(request.activityId(), request.userId()).orElseGet(() -> {
+        return repository.findBySource("SECKILL", reservationId).orElseGet(() -> {
             List<OrderItem> items = List.of(new OrderItem(
                     request.skuId(),
                     request.skuName(),
@@ -145,12 +157,15 @@ public class OrderServiceImpl implements OrderService {
                     items.get(0).amount(),
                     items,
                     "SECKILL",
+                    reservationId,
                     Instant.now(),
                     Instant.now()
             );
-            repository.bindSeckill(request.activityId(), request.userId(), request.skuId(), order.orderSn());
+            repository.bindSeckill(reservationId, request.activityId(), request.userId(), request.skuId(),
+                    order.orderSn(), request.bucketShardKey());
             repository.save(order);
             publishCloseMessage(order.orderSn());
+            enqueueSeckillOrderCreated(request, order.orderSn());
             return order;
         });
     }
@@ -168,6 +183,33 @@ public class OrderServiceImpl implements OrderService {
 
     private boolean shouldReleaseProductStock(OrderInfo order) {
         return !"SECKILL".equals(order.source());
+    }
+
+    private boolean isSeckillOrder(OrderInfo order) {
+        return "SECKILL".equals(order.source());
+    }
+
+    private void enqueueSeckillOrderCreated(SeckillOrderRequest request, String orderSn) {
+        SeckillOrderResultMessage message = SeckillOrderResultMessage.success(
+                request.requestId(),
+                request.reservationId(),
+                request.bucketShardKey(),
+                orderSn);
+        messagePublisher.enqueueSeckillOrderResult(request.reservationId(), JsonUtils.toJson(objectMapper, message),
+                request.bucketShardKey());
+    }
+
+    private void enqueueSeckillOrderCanceled(OrderInfo order) {
+        repository.findSeckillBinding(order.orderSn()).ifPresent(binding -> {
+            String reservationId = order.sourceId() == null ? binding.reservationId() : order.sourceId();
+            SeckillOrderResultMessage message = SeckillOrderResultMessage.canceled(
+                    reservationId,
+                    reservationId,
+                    binding.bucketShardKey(),
+                    "Order closed");
+            messagePublisher.enqueueSeckillOrderResult(reservationId, JsonUtils.toJson(objectMapper, message),
+                    binding.bucketShardKey());
+        });
     }
 
     private void requireSuccess(ApiResponse<Void> response, String operation) {

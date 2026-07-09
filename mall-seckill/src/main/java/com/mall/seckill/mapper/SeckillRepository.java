@@ -2,6 +2,7 @@ package com.mall.seckill.mapper;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.mall.common.exception.BusinessException;
+import com.mall.seckill.config.SeckillProperties;
 import com.mall.seckill.pojo.entity.SeckillActivity;
 import com.mall.seckill.pojo.entity.SeckillActivityEntity;
 import com.mall.seckill.pojo.entity.SeckillResultEntity;
@@ -14,9 +15,12 @@ import com.mall.seckill.pojo.vo.StockDeductProbeResponse;
 import com.mall.seckill.pojo.vo.StockDeductionResult;
 import com.mall.seckill.pojo.vo.StockReleaseResult;
 import com.mall.seckill.pojo.vo.StockVersion;
+import com.mall.seckill.service.impl.SeckillBucketService;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,17 +29,21 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 @Repository
 public class SeckillRepository {
 
     private static final ZoneId ZONE_ID = ZoneId.systemDefault();
+    private static final int MESSAGE_MAX_LENGTH = 255;
 
     private final SeckillActivityMapper activityMapper;
     private final SeckillSkuMapper skuMapper;
     private final SeckillResultMapper resultMapper;
     private final SeckillStockSnapshotMapper snapshotMapper;
+    private final SeckillBucketService bucketService;
+    private final SeckillProperties properties;
     private final MeterRegistry meterRegistry;
     private final Timer stockDeductTotalTimer;
     private final Timer stockDeductUpdateTimer;
@@ -58,10 +66,39 @@ public class SeckillRepository {
                               SeckillResultMapper resultMapper,
                               SeckillStockSnapshotMapper snapshotMapper,
                               MeterRegistry meterRegistry) {
+        this(activityMapper, skuMapper, resultMapper, snapshotMapper, (SeckillBucketService) null, new SeckillProperties(), meterRegistry);
+    }
+
+    @Autowired
+    public SeckillRepository(SeckillActivityMapper activityMapper,
+                             SeckillSkuMapper skuMapper,
+                             SeckillResultMapper resultMapper,
+                             SeckillStockSnapshotMapper snapshotMapper,
+                             ObjectProvider<SeckillBucketService> bucketService,
+                             SeckillProperties properties,
+                             MeterRegistry meterRegistry) {
+        this(activityMapper,
+                skuMapper,
+                resultMapper,
+                snapshotMapper,
+                bucketService.getIfAvailable(),
+                properties,
+                meterRegistry);
+    }
+
+    SeckillRepository(SeckillActivityMapper activityMapper,
+                      SeckillSkuMapper skuMapper,
+                      SeckillResultMapper resultMapper,
+                      SeckillStockSnapshotMapper snapshotMapper,
+                      SeckillBucketService bucketService,
+                      SeckillProperties properties,
+                      MeterRegistry meterRegistry) {
         this.activityMapper = activityMapper;
         this.skuMapper = skuMapper;
         this.resultMapper = resultMapper;
         this.snapshotMapper = snapshotMapper;
+        this.bucketService = bucketService;
+        this.properties = properties;
         this.meterRegistry = meterRegistry;
         this.stockDeductTotalTimer = timer("seckill.stock.deduct.total", "Stock-only load test total latency");
         this.stockDeductUpdateTimer = timer("seckill.stock.deduct.update", "Stock-only load test update latency");
@@ -135,6 +172,21 @@ public class SeckillRepository {
                                                 Long userId,
                                                 int quantity,
                                                 Runnable beforeStockUpdate) {
+        return recordDeduction(requestId, stockId, activityId, skuId, userId, quantity,
+                ignored -> beforeStockUpdate.run());
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public StockDeductionResult recordDeduction(String requestId,
+                                                Long stockId,
+                                                Long activityId,
+                                                Long skuId,
+                                                Long userId,
+                                                int quantity,
+                                                Consumer<Long> beforeStockUpdate) {
+        if (bucketModeEnabled()) {
+            return recordBucketDeduction(requestId, stockId, activityId, skuId, userId, quantity, null, beforeStockUpdate);
+        }
         Timer.Sample totalSample = Timer.start(meterRegistry);
         try {
             if (recordDeductionDuplicateTimer.record(() -> hasActiveDeduction(activityId, userId))) {
@@ -159,7 +211,7 @@ public class SeckillRepository {
                 return StockDeductionResult.duplicate();
             }
 
-            beforeStockUpdate.run();
+            beforeStockUpdate.accept(null);
             if (recordDeductionStockUpdateTimer.record(() -> skuMapper.deductStockAndIncreaseVersionById(stockId, quantity)) == 0) {
                 throw new SeckillStockNotEnoughException();
             }
@@ -168,6 +220,99 @@ public class SeckillRepository {
             return StockDeductionResult.success(stockVersion);
         } finally {
             totalSample.stop(recordDeductionTotalTimer);
+        }
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public StockDeductionResult recordDeduction(String requestId,
+                                                Long stockId,
+                                                Long activityId,
+                                                Long skuId,
+                                                Long userId,
+                                                int quantity,
+                                                SeckillBucketService.SelectedBucket selectedBucket,
+                                                Consumer<Long> beforeStockUpdate) {
+        if (!bucketModeEnabled()) {
+            return recordDeduction(requestId, stockId, activityId, skuId, userId, quantity, beforeStockUpdate);
+        }
+        return recordBucketDeduction(requestId, stockId, activityId, skuId, userId, quantity, selectedBucket, beforeStockUpdate);
+    }
+
+    public SeckillBucketService.SelectedBucket selectBucket(Long activityId, Long skuId) {
+        if (!bucketModeEnabled()) {
+            throw new BusinessException(409, "Seckill bucket mode is not enabled");
+        }
+        return bucketService.selectBucket(activityId, skuId);
+    }
+
+    private StockDeductionResult recordBucketDeduction(String requestId,
+                                                       Long stockId,
+                                                       Long activityId,
+                                                       Long skuId,
+                                                       Long userId,
+                                                       int quantity,
+                                                       SeckillBucketService.SelectedBucket preselectedBucket,
+                                                       Consumer<Long> beforeStockUpdate) {
+        Timer.Sample totalSample = Timer.start(meterRegistry);
+        try {
+            if (recordDeductionDuplicateTimer.record(() -> hasActiveDeduction(activityId, userId))) {
+                return StockDeductionResult.duplicate();
+            }
+            SeckillBucketService.SelectedBucket selectedBucket = preselectedBucket == null
+                    ? bucketService.selectBucket(activityId, skuId)
+                    : preselectedBucket;
+            SeckillStockSnapshotEntity snapshot = new SeckillStockSnapshotEntity();
+            snapshot.setRequestId(requestId);
+            snapshot.setStockId(stockId);
+            snapshot.setBucketId(selectedBucket.bucketId());
+            snapshot.setBucketNo(selectedBucket.bucketNo());
+            snapshot.setBucketShardKey(selectedBucket.bucketShardKey());
+            snapshot.setStrategyVersion(selectedBucket.strategyVersion());
+            snapshot.setActivityId(activityId);
+            snapshot.setSkuId(skuId);
+            snapshot.setUserId(userId);
+            snapshot.setActiveKey(userId);
+            snapshot.setQuantity(quantity);
+            snapshot.setStatus("DEDUCTED");
+            snapshot.setMessage("Stock deducted");
+            LocalDateTime now = LocalDateTime.now();
+            snapshot.setCreatedAt(now);
+            snapshot.setUpdatedAt(now);
+            try {
+                recordDeductionSnapshotInsertTimer.record(() -> snapshotMapper.insert(snapshot));
+            } catch (DuplicateKeyException exception) {
+                return StockDeductionResult.duplicate();
+            }
+
+            beforeStockUpdate.accept(selectedBucket.bucketShardKey());
+            SeckillBucketService.BucketMutationResult bucketResult = recordDeductionStockUpdateTimer.record(() -> {
+                if (preselectedBucket == null) {
+                    return bucketService.deduct(selectedBucket, requestId, activityId, skuId, quantity);
+                }
+                return bucketService.deductSelected(selectedBucket, requestId, activityId, skuId, quantity);
+            });
+            updateBucketSnapshotAfterDeduction(snapshot, bucketResult);
+            saveResult(new SeckillResult(requestId, "PROCESSING", null, "Processing"));
+            return StockDeductionResult.success(bucketResult.stockVersion());
+        } finally {
+            totalSample.stop(recordDeductionTotalTimer);
+        }
+    }
+
+    private void updateBucketSnapshotAfterDeduction(SeckillStockSnapshotEntity snapshot,
+                                                    SeckillBucketService.BucketMutationResult bucketResult) {
+        SeckillBucketService.SelectedBucket actualBucket = bucketResult.selectedBucket();
+        if (actualBucket != null) {
+            snapshot.setBucketId(actualBucket.bucketId());
+            snapshot.setBucketNo(actualBucket.bucketNo());
+            snapshot.setBucketShardKey(actualBucket.bucketShardKey());
+            snapshot.setStrategyVersion(actualBucket.strategyVersion());
+        }
+        snapshot.setChangeId(bucketResult.changeId());
+        snapshot.setUpdatedAt(LocalDateTime.now());
+        int updated = snapshotMapper.updateBucketDeductionByRequestAndShardKey(snapshot);
+        if (updated == 0) {
+            throw new BusinessException(409, "Seckill bucket snapshot update failed");
         }
     }
 
@@ -200,25 +345,39 @@ public class SeckillRepository {
         return skuMapper.selectStockVersionById(stockId);
     }
 
+    public StockVersion stockVersion(Long stockId, Long activityId, Long skuId) {
+        if (bucketModeEnabled()) {
+            return bucketService.aggregateStockVersion(activityId, skuId);
+        }
+        return stockVersion(stockId);
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public StockSnapshot confirmDeduction(String requestId, String orderSn, String message) {
-        SeckillStockSnapshotEntity snapshot = snapshotMapper.selectById(requestId);
+        return confirmDeduction(requestId, null, orderSn, message);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public StockSnapshot confirmDeduction(String requestId, Long bucketShardKey, String orderSn, String message) {
+        SeckillStockSnapshotEntity snapshot = selectSnapshot(requestId, bucketShardKey);
         if (snapshot == null) {
             return null;
         }
         if ("DEDUCTED".equals(snapshot.getStatus())) {
             LocalDateTime now = LocalDateTime.now();
+            String resultMessage = messageOrDefault(message, "Order created");
             int updated = snapshotMapper.update(null, Wrappers.<SeckillStockSnapshotEntity>lambdaUpdate()
                     .eq(SeckillStockSnapshotEntity::getRequestId, requestId)
+                    .eq(bucketShardKey != null, SeckillStockSnapshotEntity::getBucketShardKey, bucketShardKey)
                     .eq(SeckillStockSnapshotEntity::getStatus, "DEDUCTED")
                     .set(SeckillStockSnapshotEntity::getStatus, "CONFIRMED")
                     .set(SeckillStockSnapshotEntity::getOrderSn, orderSn)
-                    .set(SeckillStockSnapshotEntity::getMessage, message == null ? "Order created" : message)
+                    .set(SeckillStockSnapshotEntity::getMessage, resultMessage)
                     .set(SeckillStockSnapshotEntity::getUpdatedAt, now));
             if (updated > 0) {
                 snapshot.setStatus("CONFIRMED");
                 snapshot.setOrderSn(orderSn);
-                snapshot.setMessage(message == null ? "Order created" : message);
+                snapshot.setMessage(resultMessage);
                 snapshot.setUpdatedAt(now);
             }
         }
@@ -227,38 +386,82 @@ public class SeckillRepository {
 
     @Transactional(rollbackFor = Exception.class)
     public StockReleaseResult releaseDeduction(String requestId, String message) {
+        return releaseDeduction(requestId, null, message);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public StockReleaseResult releaseDeduction(String requestId, Long bucketShardKey, String message) {
+        return releaseSnapshot(requestId, bucketShardKey, message, "DEDUCTED");
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public StockReleaseResult releaseConfirmedDeduction(String requestId, Long bucketShardKey, String message) {
+        return releaseSnapshot(requestId, bucketShardKey, message, "CONFIRMED");
+    }
+
+    private StockReleaseResult releaseSnapshot(String requestId, Long bucketShardKey, String message, String releasableStatus) {
         Timer.Sample totalSample = Timer.start(meterRegistry);
         try {
-            SeckillStockSnapshotEntity snapshot = snapshotMapper.selectById(requestId);
+            SeckillStockSnapshotEntity snapshot = selectSnapshot(requestId, bucketShardKey);
             if (snapshot == null) {
                 return null;
             }
             StockVersion stockVersion = null;
-            if ("DEDUCTED".equals(snapshot.getStatus())) {
+            if (releasableStatus.equals(snapshot.getStatus())) {
                 LocalDateTime now = LocalDateTime.now();
+                String resultMessage = messageOrDefault(message, "Stock released");
                 int updated = releaseDeductionSnapshotUpdateTimer.record(() -> snapshotMapper.update(null, Wrappers.<SeckillStockSnapshotEntity>lambdaUpdate()
                         .eq(SeckillStockSnapshotEntity::getRequestId, requestId)
-                        .eq(SeckillStockSnapshotEntity::getStatus, "DEDUCTED")
-                        .set(SeckillStockSnapshotEntity::getStatus, "RELEASED")
-                        .set(SeckillStockSnapshotEntity::getActiveKey, null)
-                        .set(SeckillStockSnapshotEntity::getMessage, message == null ? "Stock released" : message)
+                        .eq(bucketShardKey != null, SeckillStockSnapshotEntity::getBucketShardKey, bucketShardKey)
+                        .eq(SeckillStockSnapshotEntity::getStatus, releasableStatus)
+                        .set(SeckillStockSnapshotEntity::getStatus, "RELEASING")
+                        .set(SeckillStockSnapshotEntity::getMessage, resultMessage)
                         .set(SeckillStockSnapshotEntity::getUpdatedAt, now)));
                 if (updated > 0) {
-                    Long stockId = resolveSnapshotStockId(snapshot);
-                    if (releaseDeductionStockUpdateTimer.record(() -> skuMapper.releaseStockAndIncreaseVersionById(stockId, snapshot.getQuantity())) == 0) {
-                        throw new BusinessException(409, "Seckill stock ledger release failed");
+                    if (bucketModeEnabled() && snapshot.getBucketId() != null) {
+                        stockVersion = releaseDeductionStockUpdateTimer.record(() -> bucketService.release(snapshot));
+                    } else {
+                        Long stockId = resolveSnapshotStockId(snapshot);
+                        if (releaseDeductionStockUpdateTimer.record(() -> skuMapper.releaseStockAndIncreaseVersionById(stockId, snapshot.getQuantity())) == 0) {
+                            throw new BusinessException(409, "Seckill stock ledger release failed");
+                        }
+                        stockVersion = releaseDeductionStockSelectTimer.record(() -> skuMapper.selectStockVersionById(stockId));
                     }
-                    stockVersion = releaseDeductionStockSelectTimer.record(() -> skuMapper.selectStockVersionById(stockId));
+                    int released = snapshotMapper.update(null, Wrappers.<SeckillStockSnapshotEntity>lambdaUpdate()
+                            .eq(SeckillStockSnapshotEntity::getRequestId, requestId)
+                            .eq(bucketShardKey != null, SeckillStockSnapshotEntity::getBucketShardKey, bucketShardKey)
+                            .eq(SeckillStockSnapshotEntity::getStatus, "RELEASING")
+                            .set(SeckillStockSnapshotEntity::getStatus, "RELEASED")
+                            .set(SeckillStockSnapshotEntity::getActiveKey, null)
+                            .set(SeckillStockSnapshotEntity::getMessage, resultMessage)
+                            .set(SeckillStockSnapshotEntity::getUpdatedAt, LocalDateTime.now()));
+                    if (released == 0) {
+                        throw new BusinessException(409, "Seckill stock snapshot release finalize failed");
+                    }
                     snapshot.setStatus("RELEASED");
                     snapshot.setActiveKey(null);
-                    snapshot.setMessage(message == null ? "Stock released" : message);
-                    snapshot.setUpdatedAt(now);
+                    snapshot.setMessage(resultMessage);
+                    snapshot.setUpdatedAt(LocalDateTime.now());
                 }
             }
             return new StockReleaseResult(toStockSnapshot(snapshot), stockVersion);
         } finally {
             totalSample.stop(releaseDeductionTotalTimer);
         }
+    }
+
+    private SeckillStockSnapshotEntity selectSnapshot(String requestId, Long bucketShardKey) {
+        if (bucketShardKey == null) {
+            return snapshotMapper.selectById(requestId);
+        }
+        return snapshotMapper.selectOne(Wrappers.<SeckillStockSnapshotEntity>lambdaQuery()
+                .eq(SeckillStockSnapshotEntity::getRequestId, requestId)
+                .eq(SeckillStockSnapshotEntity::getBucketShardKey, bucketShardKey));
+    }
+
+    public StockSnapshot findStockSnapshot(String requestId, Long bucketShardKey) {
+        SeckillStockSnapshotEntity snapshot = selectSnapshot(requestId, bucketShardKey);
+        return snapshot == null ? null : toStockSnapshot(snapshot);
     }
 
     public void saveResult(SeckillResult result) {
@@ -270,7 +473,7 @@ public class SeckillRepository {
         entity.setRequestId(result.requestId());
         entity.setStatus(result.status());
         entity.setOrderSn(result.orderSn());
-        entity.setMessage(result.message());
+        entity.setMessage(truncate(result.message(), MESSAGE_MAX_LENGTH));
         entity.setUpdatedAt(LocalDateTime.now());
         try {
             resultMapper.insert(entity);
@@ -338,6 +541,25 @@ public class SeckillRepository {
         return Timer.builder(name)
                 .description(description)
                 .register(meterRegistry);
+    }
+
+    private boolean bucketModeEnabled() {
+        return bucketService != null && properties.getBucket().isEnabled();
+    }
+
+    public boolean isBucketModeEnabled() {
+        return bucketModeEnabled();
+    }
+
+    private String messageOrDefault(String message, String defaultMessage) {
+        return truncate(message == null ? defaultMessage : message, MESSAGE_MAX_LENGTH);
+    }
+
+    private String truncate(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength);
     }
 
     public record StockSnapshot(String requestId,

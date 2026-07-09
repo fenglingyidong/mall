@@ -25,6 +25,8 @@ public class OrderInfoEntity {
 
     private String source;
 
+    private String sourceId;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;

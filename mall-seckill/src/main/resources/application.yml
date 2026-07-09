@@ -52,14 +52,69 @@ mall:
         enabled: false
         fixed-delay: 60000
         limit: 1000
+    reservation-guard:
+      enabled: false
+      processing-probe-after-seconds: 30
+      safe-release-after-seconds: 300
+      repair-batch-size: 100
+      repair-fixed-delay: 60000
+    result-retry:
+      enabled: false
+      delays:
+        - 5s
+        - 30s
+        - 2m
+        - 10m
+      max-attempts: 4
+      fixed-delay: 1000
     hotspot:
       enabled: false
       items: []
       permits-per-second: 100
       max-concurrent: 100
       warmup-enabled: false
+    bucket:
+      enabled: false
+      default-bucket-count: 16
+      hot-path-aggregate-read: false
+      availability:
+        enabled: false
+        exhausted-bucket-ttl-millis: 500
+        flush-delay-millis: 200
+        fixed-delay: 100
+        batch-size: 100
+        lock-wait-millis: 20
+        lock-lease-millis: 500
+      center-ledger:
+        enabled: false
+        fixed-delay: 1000
+        batch-size: 100
+      reconcile:
+        enabled: false
+        fixed-delay: 60000
+        batch-size: 100
+      transfer:
+        enabled: false
+        lock-wait-millis: 20
+        lock-lease-millis: 200
+        max-attempts: 1
+        size: 8
+        request-fallback-min-interval-millis: 500
+      auto-transfer:
+        enabled: false
+        fixed-delay: 60000
+        batch-size: 100
+        max-pairs-per-sku: 8
+        low-watermark: 0
+        transfer-size: 8
+        source-reserve-quantity: 1
+        lock-wait-millis: 20
+        lock-lease-millis: 500
     load-test:
       stock-deduct-enabled: false
+  message:
+    compensation:
+      dispatching-timeout-seconds: 30
 
 mybatis-plus:
   configuration:
@@ -93,8 +148,21 @@ management:
         seckill.submit.record.snapshot.insert: true
         seckill.submit.record.stock.update: true
         seckill.submit.record.stock.select: true
+        seckill.submit.record.bucket.route: true
+        seckill.submit.record.bucket.db.deduct: true
+        seckill.submit.record.bucket.change-log.insert: true
+        seckill.submit.record.bucket.stock-version: true
+        seckill.submit.record.bucket.transfer.total: true
+        seckill.submit.record.bucket.transfer.lock.wait: true
+        seckill.submit.record.bucket.transfer.db.move: true
+        seckill.submit.record.bucket.transfer.change-log.insert: true
+        seckill.submit.record.mq.enqueue: true
+        reliable.message.after-commit.dispatch: true
+        reliable.message.mq.send: true
         seckill.submit.result.save: true
         seckill.submit.release.total: true
         seckill.submit.release.snapshot.update: true
         seckill.submit.release.stock.update: true
         seckill.submit.release.stock.select: true
+        seckill.bucket.reconcile.total: true
+        seckill.bucket.auto.transfer.total: true

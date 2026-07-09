@@ -24,9 +24,13 @@ public class MqMessageEntity {
 
     private String payload;
 
+    private Long bucketShardKey;
+
     private Long delayMillis;
 
     private String status;
+
+    private String errorType;
 
     private String errorMessage;
 

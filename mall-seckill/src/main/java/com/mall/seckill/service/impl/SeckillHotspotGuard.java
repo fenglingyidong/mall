@@ -1,23 +1,27 @@
 package com.mall.seckill.service.impl;
 
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.mall.common.exception.BusinessException;
 import com.mall.seckill.config.SeckillProperties;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Semaphore;
 
 @Component
 public class SeckillHotspotGuard {
 
     private final SeckillProperties properties;
-    private final ConcurrentMap<String, Semaphore> semaphores = new ConcurrentHashMap<>();
+    private final LoadingCache<String, Semaphore> semaphores;
 
     public SeckillHotspotGuard(SeckillProperties properties) {
         this.properties = properties;
+        // Do not evict active semaphore gates, or a hot item could get multiple concurrency counters.
+        this.semaphores = Caffeine.newBuilder()
+                .recordStats()
+                .build(ignored -> new Semaphore(maxConcurrent()));
     }
 
     public boolean isHotspot(Long activityId, Long skuId) {
@@ -35,11 +39,10 @@ public class SeckillHotspotGuard {
         if (!isHotspot(activityId, skuId)) {
             return HotspotPermit.noop();
         }
-        int maxConcurrent = hotspotProperties().getMaxConcurrent();
-        if (maxConcurrent <= 0) {
+        if (maxConcurrent() <= 0) {
             throw new BusinessException(429, "Hotspot seckill busy");
         }
-        Semaphore semaphore = semaphores.computeIfAbsent(itemKey(activityId, skuId), key -> new Semaphore(maxConcurrent));
+        Semaphore semaphore = semaphores.get(itemKey(activityId, skuId));
         if (!semaphore.tryAcquire()) {
             throw new BusinessException(429, "Hotspot seckill busy");
         }
@@ -77,6 +80,10 @@ public class SeckillHotspotGuard {
 
     private SeckillProperties.Hotspot hotspotProperties() {
         return properties.getHotspot();
+    }
+
+    private int maxConcurrent() {
+        return hotspotProperties().getMaxConcurrent();
     }
 
     public record HotspotItem(Long activityId, Long skuId) {

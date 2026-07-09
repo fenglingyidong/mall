@@ -24,7 +24,7 @@ services:
     ports:
       - "3307:3306"
     volumes:
-      - ./sql:/docker-entrypoint-initdb.d
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/000-schema.sql:ro
 
   redis:
     image: redis:7
@@ -36,39 +36,40 @@ services:
     image: tairmodule/tairstring:latest
     container_name: mall-tairstring
     ports:
-      - "6381:6379"
+      - "16381:6379"
 
-  # oceanbase:
-  #   image: oceanbase/oceanbase-ce:latest
-  #   container_name: mall-oceanbase-ce
-  #   environment:
-  #     MODE: mini
-  #     OB_MEMORY_LIMIT: 6G
-  #     OB_DATAFILE_SIZE: 4G
-  #     OB_LOG_DISK_SIZE: 4G
-  #   ports:
-  #     - "2881:2881"
-  #     - "2882:2882"
   oceanbase:
     image: oceanbase/oceanbase-ce:latest
     container_name: mall-oceanbase-ce
-    mem_limit: 18g
-    cpus: "6.0"
+    mem_limit: 8g
+    cpus: "4.0"
     environment:
       MODE: normal
-      OB_MEMORY_LIMIT: 12G
-      OB_SYSTEM_MEMORY: 2G
-      OB_TENANT_MINI_CPU: 4
-      OB_TENANT_MEMORY_SIZE: 10G
-      OB_DATAFILE_SIZE: 20G
-      OB_LOG_DISK_SIZE: 20G
       OB_TENANT_PASSWORD: root
     ports:
       - "2881:2881"
       - "2882:2882"
+      - "2886:2886"
     volumes:
-    - oceanbase-data:/root/ob
-    - oceanbase-conf:/root/.obd/cluster
+      - oceanbase-data:/root/ob
+      - oceanbase-conf:/root/.obd/cluster
+
+  oceanbase-shard1:
+    image: oceanbase/oceanbase-ce:latest
+    container_name: mall-oceanbase-ce-shard1
+    profiles:
+      - stage3c-sharding
+    mem_limit: 8g
+    cpus: "4.0"
+    environment:
+      MODE: normal
+      OB_TENANT_PASSWORD: root
+    ports:
+      - "3881:2881"
+      - "3882:2882"
+    volumes:
+      - oceanbase-shard1-data:/root/ob
+      - oceanbase-shard1-conf:/root/.obd/cluster
 
   rabbitmq:
     image: rabbitmq:3-management
@@ -153,3 +154,5 @@ volumes:
   grafana-data:
   oceanbase-data:
   oceanbase-conf:
+  oceanbase-shard1-data:
+  oceanbase-shard1-conf:

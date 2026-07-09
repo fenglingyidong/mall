@@ -18,7 +18,7 @@ class ReliableMessageRepositoryTest {
     private MqMessageMapper messageMapper;
 
     @Test
-    void markSentShouldNotOverwriteConsumedMessages() {
+    void markSentShouldOnlyUpdateDispatchingMessages() {
         ReliableMessageRepository repository = new ReliableMessageRepository(messageMapper);
 
         repository.markSent("m1");
@@ -31,7 +31,21 @@ class ReliableMessageRepositoryTest {
     }
 
     @Test
-    void markFailedShouldNotOverwriteConsumedMessages() {
+    void markSentByShardShouldOnlyUpdateDispatchingMessages() {
+        ReliableMessageRepository repository = new ReliableMessageRepository(messageMapper);
+
+        repository.markSent("m1", 3L);
+
+        Wrapper<MqMessageEntity> wrapper = capturedUpdateWrapper();
+        assertThat(wrapper.getSqlSegment())
+                .contains("message_id")
+                .contains("bucket_shard_key")
+                .contains("status")
+                .contains("IN");
+    }
+
+    @Test
+    void markFailedShouldOnlyUpdateDispatchingMessages() {
         ReliableMessageRepository repository = new ReliableMessageRepository(messageMapper);
 
         repository.markFailed("m1", "failed");
@@ -40,7 +54,19 @@ class ReliableMessageRepositoryTest {
         assertThat(wrapper.getSqlSegment())
                 .contains("message_id")
                 .contains("status")
-                .contains("<>");
+                .contains("IN");
+    }
+
+    @Test
+    void markConsumedByShardShouldRouteWithBucketShardKey() {
+        ReliableMessageRepository repository = new ReliableMessageRepository(messageMapper);
+
+        repository.markConsumed("m1", 3L);
+
+        Wrapper<MqMessageEntity> wrapper = capturedUpdateWrapper();
+        assertThat(wrapper.getSqlSegment())
+                .contains("message_id")
+                .contains("bucket_shard_key");
     }
 
     private Wrapper<MqMessageEntity> capturedUpdateWrapper() {

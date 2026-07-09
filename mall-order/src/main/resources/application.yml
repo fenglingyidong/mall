@@ -40,11 +40,25 @@ spring:
 
 mall:
   order:
-    close-delay-seconds: 30
+    close-delay-seconds: 300
   message:
+    dispatch:
+      core-pool-size: 8
+      max-pool-size: 16
+      queue-capacity: 50000
+    listener:
+      seckill-order-create:
+        concurrency: 8
+        max-concurrency: 16
+        prefetch: 50
+      order-close:
+        concurrency: 8
+        max-concurrency: 16
+        prefetch: 50
     compensation:
       enabled: true
-      fixed-delay: 60000
+      fixed-delay: 10000
+      batch-size: 5000
 
 mybatis-plus:
   configuration:

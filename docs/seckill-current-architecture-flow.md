@@ -3,73 +3,117 @@
 ## 目录
 
 - [1. 当前定位](#1-当前定位)
-- [2. 总体架构](#2-总体架构)
-- [3. 秒杀提交主链路](#3-秒杀提交主链路)
-- [4. OceanBase 事务扣减](#4-oceanbase-事务扣减)
-- [5. 异步建单和结果回传](#5-异步建单和结果回传)
-- [6. 库存缓存链路](#6-库存缓存链路)
-- [7. stock-only 压测链路](#7-stock-only-压测链路)
-- [8. 当前关键结论](#8-当前关键结论)
-- [9. 代码锚点](#9-代码锚点)
+- [2. 当前运行态开关](#2-当前运行态开关)
+- [3. 总体架构](#3-总体架构)
+- [4. 秒杀提交主链路](#4-秒杀提交主链路)
+- [5. OceanBase 分桶分片事务](#5-oceanbase-分桶分片事务)
+- [6. 异步建单和结果回传](#6-异步建单和结果回传)
+- [7. 后台治理能力](#7-后台治理能力)
+- [8. 缓存和保护开关](#8-缓存和保护开关)
+- [9. 压测入口和结果口径](#9-压测入口和结果口径)
+- [10. 当前关键结论](#10-当前关键结论)
+- [11. 代码锚点](#11-代码锚点)
 
 ## 1. 当前定位
 
-当前 `mall-seckill` 已经不是“Redis 信号量作为最终库存”的模型。
 
-现状更接近文档阶段一：
+现在真实运行的秒杀主架构是：
 
-- OceanBase/MySQL 表 `seckill_sku` 是库存事实源。
-- HTTP 秒杀提交链路同步执行库存扣减、快照账本写入和 `mq_message` outbox 落库。
-- TairString/Redis 只做库存缓存和售罄快速失败，不作为最终库存账本。
-- RabbitMQ 只负责异步创建订单和结果回传；建单消息由 outbox 提交后异步发送，并由补偿任务兜底重发。
-- `seckill_stock_snapshot` 解释每一次扣减、确认和释放。
+```text
+OceanBase 分桶分片库存 + OceanBase reservation/outbox + RabbitMQ +
+MySQL 正式订单 + 结果消息回写 OceanBase
+```
 
-当前实现和阶段一文档的主要差异：
+更准确一点：
 
-- 文档里的 `LOGIC_UPDATE` 是概念化热点行更新，本项目实际用 MyBatis 执行 `UPDATE + SELECT`。
-- 文档阶段一按库存行主键更新；当前正式链路已经解析并传入 `seckill_sku.id`，扣减 SQL 使用 `WHERE id = ?`。
-- TairString 版本写缓存已经落地，但它是缓存一致性优化，不是最终库存账本。
-- 建单消息不再由请求线程同步依赖 RabbitMQ 发布成功；请求线程只保证库存账本和 outbox 同事务提交。
-- RabbitMQ 临时不可用时不立即释放库存，`mq_message` 保留 `NEW/FAILED` 状态并由补偿任务重发。
+- `mall-seckill` 负责同步创建全局 reservation guard、选桶后提前持久化 `bucket_shard_key`、扣业务桶库存、写 reservation 账本、写建单 outbox。
+- `mall-order` 负责异步创建正式订单，订单事实表存放在 MySQL。
+- `mall-seckill` 再消费订单结果消息，把 reservation 从 `DEDUCTED` 推进到 `CONFIRMED`，或在失败/关单时推进到 `RELEASED` 并回补库存。
 
-## 2. 总体架构
+当前实现里：
+
+- `requestId` 是请求幂等号，也是 C 端查询结果的主键；HTTP 提交可通过 `X-Request-Id` 传入，不传则服务端生成。
+- `reservationId` 是订单侧和库存侧对同一笔秒杀资格的统一凭证。
+- 当前代码里 `reservationId` 默认直接复用规范化后的 `requestId`。
+
+## 2. 当前运行态开关
+
+下面这组状态描述的是当前压测脚本实际启动的运行态，不是“代码里是否支持”。
+
+`mall-seckill` 当前使用 `stage3c-sharding` profile：
+
+- `bucket.enabled = true`
+- `routing.physicalShardCount = 2`
+- `hot-path-aggregate-read = false`
+- `lock.enabled = false`
+- `stock-cache.enabled = true`
+- `stock-cache.repair.enabled = true`
+- `reservation-guard.enabled = true`
+- `result-retry.enabled = true`
+- `bucket.center-ledger.enabled = true`
+- `bucket.transfer.enabled = true`
+- `bucket.transfer.max-attempts = 1`
+- `bucket.auto-transfer.enabled = true`
+- `bucket.availability.enabled = true`
+- `bucket.reconcile.enabled = false`
+
+`mall-order` 当前使用 MySQL 本地订单库：
+
+- `spring.datasource.url = jdbc:mysql://localhost:3307/mall`
+- 秒杀建单消费者并发：`8~16`
+- 秒杀结果消息由订单服务本地 outbox 异步投递
+
+所以要区分两层含义：
+
+- 代码能力：已经实现了中心桶总账、自动调拨、调拨兜底、碎片整理等组件。
+- 当前运行态：中心总账、请求触发调拨、自动调拨已经纳入 `stage3c-sharding` 默认态；当前默认关闭的是用户维度 Redisson 提交短锁和 `reconcile`。
+
+## 3. 总体架构
 
 ```mermaid
 flowchart LR
     Client[客户端]
-    Gateway[HTTP 接口<br/>mall-seckill]
-    Hotspot[热点识别/快速拒绝<br/>SeckillHotspotGuard]
-    Sentinel[Sentinel 限流<br/>seckill-submit]
-    Redisson[Redisson 用户维度短锁<br/>防并发重复提交]
+    Gateway[mall-seckill<br/>HTTP 提交]
+    Guard[热点识别 + Sentinel + 可选 Caffeine/Redisson]
     SeckillSvc[SeckillServiceImpl]
-    OB[(OceanBase/MySQL<br/>seckill_sku<br/>seckill_stock_snapshot<br/>seckill_result)]
-    Outbox[(mq_message<br/>可靠消息 outbox)]
-    Dispatcher[afterCommit 异步发送<br/>MessageCompensationJob 补偿]
-    Tair[(TairString/Redis<br/>库存版本缓存)]
-    MQ[(RabbitMQ<br/>mall.exchange)]
-    OrderSvc[mall-order<br/>异步创建秒杀订单]
-    OrderDB[(Order DB<br/>consume_record<br/>seckill_order<br/>order_info<br/>order_item)]
-    ResultListener[SeckillResultMessageListener]
+    Sharding[(ShardingSphere JDBC)]
+    OB0[(OceanBase ds0<br/>center bucket<br/>部分 business bucket<br/>snapshot/change_log/outbox/result)]
+    OB1[(OceanBase ds1<br/>部分 business bucket<br/>snapshot/change_log/outbox)]
+    MQ[(RabbitMQ)]
+    OrderConsumer[mall-order<br/>秒杀建单消费者]
+    MySQL[(MySQL<br/>order_info/order_item<br/>seckill_order/consume_record/mq_message)]
+    ResultConsumer[mall-seckill<br/>结果消费者]
+    DelayClose[mall-order<br/>延迟关单]
+    Tair[(TairString/Redis<br/>版本缓存<br/>当前 profile 默认开启)]
 
-    Client --> Gateway
-    Gateway --> Hotspot
-    Hotspot --> Sentinel
-    Sentinel --> Redisson
-    Redisson --> SeckillSvc
-    SeckillSvc --> OB
-    OB --> Outbox
-    Outbox --> Dispatcher
-    Dispatcher --> MQ
-    SeckillSvc --> Tair
-    MQ --> OrderSvc
-    OrderSvc --> OrderDB
-    OrderSvc --> MQ
-    MQ --> ResultListener
-    ResultListener --> OB
-    ResultListener --> Tair
+    Client --> Gateway --> Guard --> SeckillSvc --> Sharding
+    Sharding --> OB0
+    Sharding --> OB1
+    SeckillSvc --> MQ
+    MQ --> OrderConsumer --> MySQL
+    OrderConsumer --> MQ
+    MySQL --> DelayClose
+    MQ --> ResultConsumer --> Sharding
+    ResultConsumer --> Tair
 ```
 
-## 3. 秒杀提交主链路
+表职责可以概括成：
+
+- OceanBase：
+  - `seckill_reservation_guard`：全局资格 guard，当前作为 ShardingSphere single table 固定在 `ds_0`
+  - `seckill_stock_bucket`：业务桶和中心桶
+  - `seckill_stock_snapshot`：reservation 账本
+  - `seckill_stock_change_log`：库存变更日志
+  - `mq_message`：秒杀侧建单 outbox
+  - `seckill_result`：结果查询视图
+  - `seckill_result_retry`：订单结果消费失败后的延迟重试/最终 DLQ 记录
+- MySQL：
+  - `order_info / order_item`：正式订单
+  - `seckill_order`：reservation 与订单号绑定
+  - `consume_record`：消费幂等
+  - `mq_message`：订单侧结果消息 outbox、延迟关单 outbox
+
+## 4. 秒杀提交主链路
 
 入口：
 
@@ -77,124 +121,228 @@ flowchart LR
 POST /api/seckill/{activityId}/{skuId}
 ```
 
-返回语义：
+可选请求头：
 
-- 同步返回 `requestId` 和 `ACCEPTED/FAILED`。
-- 活动未开始、限流、重复提交锁未获取等前置校验失败发生在生成 `requestId` 前，按业务异常响应，不进入结果查询闭环。
-- 订单是否最终创建成功，需要查询结果接口：
+```text
+X-Request-Id: <client-idempotency-key>
+```
+
+结果查询：
 
 ```text
 GET /api/seckill/result/{requestId}
 ```
 
-流程图：
+返回语义：
+
+- 活动未开始、限流、未拿到重复提交锁等前置失败，直接返回业务异常，不进入 `requestId` 查询闭环。
+- 同一个 `X-Request-Id` 重复提交时，返回上一次 reservation 的处理结果，不重新扣减。
+- 同一用户已有进行中或已成功的 guard 时，返回重复购买语义，不重新分桶或扣库存。
+- 同步返回 `ACCEPTED + requestId` 只表示 reservation 已成功落库并进入异步建单，不等价于“正式订单已创建”。
+- 最终是否成功，要看 `GET /api/seckill/result/{requestId}`。
 
 ```mermaid
 flowchart TD
     Start([用户提交秒杀])
     Api[SeckillController.submit]
-    HotspotCheck[SeckillHotspotGuard.isHotspot]
-    Limit[SentinelSeckillGuard.checkSubmit<br/>携带热点标记]
-    User[读取 UserContext 用户]
-    Activity[读取活动元数据<br/>本地短 TTL 缓存]
+    Hotspot[SeckillHotspotGuard.isHotspot]
+    Sentinel[SentinelSeckillGuard.checkSubmit]
+    User[读取 UserContext]
+    Meta[读取活动与 SKU 元数据<br/>本地 TTL 缓存]
     Active{活动是否进行中}
-    Sku[读取 SKU 元数据<br/>解析 seckill_sku.id<br/>本地短 TTL 缓存]
     LockEnabled{Redisson 锁是否启用}
-    Lock[tryLock<br/>seckill:submit:lock:activity:sku:user]
-    LockOk{是否拿到锁}
-    HotspotPermit[SeckillHotspotGuard.acquire<br/>热点保护许可]
-    CacheSoldOut{TairString 是否显示售罄}
-    Deduct[recordDeductionAndEnqueueOrder<br/>同事务：快照 + outbox + 库存扣减]
-    DeductOk{扣减是否成功}
-    Refresh[按 stock/version<br/>刷新 TairString]
-    AfterCommit[事务提交后异步发送 MQ<br/>失败由 outbox 补偿]
-    SaveFail[写 seckill_result=FAILED]
+    Lock[tryLock user 维度短锁]
+    LockOk{拿到锁?}
+    Permit[热点许可]
+    SoldOut{库存缓存显示售罄?}
+    GuardReserve[createOrLoad reservation guard<br/>requestId 幂等 + 用户占用]
+    GuardNew{新建 guard?}
+    Existing[返回已有结果或重复购买]
+    SelectBucket[选择业务桶]
+    AttachBucket[写 guard.bucket_shard_key]
+    Tx[recordDeductionAndEnqueueOrder]
+    Success{扣减成功?}
+    Refresh[刷新库存缓存<br/>当前 profile 默认不开]
     Accepted[返回 ACCEPTED + requestId]
-    Failed[返回 FAILED + requestId]
-    Rollback[事务回滚<br/>不产生库存扣减和 outbox]
-    Rejected[HTTP 业务异常<br/>无 requestId 闭环]
-    Unlock[释放 Redisson 锁]
+    Failed[写 FAILED 结果并返回]
+    Reject[直接业务异常]
+    Unlock[释放锁]
 
-    Start --> Api --> HotspotCheck --> Limit --> User --> Activity --> Active
-    Active -- 否 --> Rejected
-    Active -- 是 --> Sku --> LockEnabled
-    LockEnabled -- 否 --> HotspotPermit
+    Start --> Api --> Hotspot --> Sentinel --> User --> Meta --> Active
+    Active -- 否 --> Reject
+    Active -- 是 --> LockEnabled
+    LockEnabled -- 否 --> Permit
     LockEnabled -- 是 --> Lock --> LockOk
-    LockOk -- 否 --> Rejected
-    LockOk -- 是 --> HotspotPermit
-    HotspotPermit --> CacheSoldOut
-    CacheSoldOut -- 是 --> SaveFail --> Failed
-    CacheSoldOut -- 否 --> Deduct --> DeductOk
-    DeductOk -- 库存不足或重复购买 --> SaveFail --> Failed
-    DeductOk -- 成功 --> Refresh --> Accepted
-    DeductOk -- outbox/DB 异常 --> Rollback
-    Accepted -. 提交后 .-> AfterCommit
-    Rollback --> Rejected
-    Accepted --> Unlock
-    Failed --> Unlock
-    Rejected --> Unlock
+    LockOk -- 否 --> Reject
+    LockOk -- 是 --> Permit
+    Permit --> SoldOut
+    SoldOut -- 是 --> Failed
+    SoldOut -- 否 --> GuardReserve --> GuardNew
+    GuardNew -- 否 --> Existing
+    GuardNew -- 是 --> SelectBucket --> AttachBucket --> Tx --> Success
+    Success -- 否 --> Failed
+    Success -- 是 --> Refresh --> Accepted
+    LockOk --> Unlock
 ```
 
 说明：
 
-- Redisson 锁只保护同一用户、同一活动、同一 SKU 的并发重复提交。
-- 真正的重复购买判断仍在数据库事务内通过 `seckill_stock_snapshot` 状态判断。
-- TairString 售罄判断是快速失败。缓存异常时会降级为继续访问数据库。
-- 库存扣减成功且 outbox 同事务落库后，订单创建还未完成，所以 HTTP 返回 `ACCEPTED`。
-- 请求线程不再等待 RabbitMQ 端到端发布成功；事务提交后由 `ReliableMessagePublisher` 的 afterCommit 异步线程发送。
-- 如果服务在提交后、异步发送前宕机，`mq_message` 中的 `NEW` 记录会被 `MessageCompensationJob` 扫描重发。
+- 热点保护、Sentinel、Redisson 锁都还在代码里。
+- 当前 `stage3c-sharding` profile 下 `lock.enabled=false`，所以运行时不会进入用户维度 Redisson 提交短锁。
+- 当前 `stage3c-sharding` profile 下 `stock-cache.enabled=true`，提交入口会先读 Redis/TairString 做售罄快速失败；但因为 `hot-path-aggregate-read=false`，成功扣减后的版本缓存通常不在热路径同步刷新，而是依赖预热、回补路径和 `SeckillStockCacheRepairJob` 追平。
+- `SeckillHotspotGuard` 当前用 `Caffeine` 本地缓存每个热点 SKU 的 `Semaphore` 门闸；只有显式打开 `mall.seckill.hotspot.enabled=true` 时才生效。
+- 当前 profile 开启 `reservation-guard.enabled=true`，真正的重复购买判断以 `seckill_reservation_guard(activity_id, active_key)` 为准；该表当前固定在 `ds_0`，避免分片内唯一索引误当全局唯一。
+- `bucket_shard_key` 在选桶后、扣减前写入 guard，repair 可以据此定位库存分片。
+- snapshot/outbox/change_log/result 落库和业务桶扣减是同一事务。
+- 秒杀提交在事务扣减阶段对瞬时数据库异常有最多 `3` 次重试和退避，只对 `TransientDataAccessException`、`SQLTransientException`、死锁类错误生效。
 
-## 4. OceanBase 事务扣减
+## 5. OceanBase 分桶分片事务
 
 核心方法：
 
 ```text
-SeckillRepository.recordDeduction(requestId, stockId, activityId, skuId, userId, quantity, beforeStockUpdate)
+SeckillServiceImpl.doSubmitWithReservationGuard(...)
+ReservationGuardRepository.createOrLoad(...)
+ReservationGuardRepository.attachBucket(...)
+SeckillRepository.recordDeduction(...)
 ```
 
-当前事务内做五件事：
+当前 `bucket.enabled=true` 时，事务内做的是“业务桶扣减”，不是单行 `seckill_sku.stock` 条件更新。
 
-1. 写扣减快照。
-2. 写 `mq_message` 建单 outbox，状态为 `NEW`。
-3. 注册事务提交后的异步发送回调。
-4. 按主键扣减 `seckill_sku.stock` 并递增 `version`。
-5. 写 `seckill_result=PROCESSING`。
+主流程：
 
-流程图：
+1. `ReservationGuardRepository.createOrLoad(...)` 先插入 `seckill_reservation_guard(status=PROCESSING, active_key=userId)`。
+2. 如果 `requestId` 已存在，直接返回上一次请求的结果。
+3. 如果 `(activity_id, active_key)` 已存在，直接返回重复购买或已购买语义。
+4. 通过 `SeckillBucketService.selectBucket(activityId, skuId)` 选择可扣减业务桶。
+5. 扣减前调用 `attachBucket(...)`，把 `bucket_id/bucket_no/bucket_shard_key` 持久化到 guard。
+6. 进入 `SeckillRepository.recordDeduction(...)` 事务，插入 `seckill_stock_snapshot(status=DEDUCTED)`。
+7. 同一事务内写秒杀侧建单 outbox `mq_message(status=NEW)`、扣减业务桶、写 `seckill_stock_change_log`、写 `seckill_result=PROCESSING`。
+8. 如果当前业务桶条件扣减返回 0，会查询该桶实际库存；若 `saleable_quantity <= 0`，则把业务桶条件标记为 `EMPTY`，并向 `SeckillBucketAvailabilityCoordinator` 发出可能已空信号。
+9. 如果请求触发调拨可用，目标桶被打空时会尝试调拨后再扣减；无法恢复时才按库存不足回滚。
+10. 事务提交后注册的 `afterCommit` 异步投递 RabbitMQ；扣减成功后 guard 从 `PROCESSING` CAS 到 `DEDUCTED`。
+11. 如果能证明扣减事务未提交，guard 可从 `PROCESSING` CAS 到 `FAILED` 并释放 `active_key`；如果事务状态未知，保留 `PROCESSING`，交给 repair 判定。
 
 ```mermaid
 flowchart TD
-    TxStart([开始数据库事务])
-    Duplicate[查询 active snapshot<br/>DEDUCTED 或 CONFIRMED]
-    IsDuplicate{是否重复购买}
-    InsertSnapshot[插入 seckill_stock_snapshot<br/>status=DEDUCTED]
-    SaveOutbox[插入 mq_message<br/>routingKey=seckill.order.create<br/>status=NEW]
-    RegisterDispatch[注册 afterCommit<br/>异步发送 MQ]
-    UpdateStock[UPDATE seckill_sku<br/>SET stock=stock-1, version=version+1<br/>WHERE id=stockId AND stock>=1]
-    Updated{影响行数 > 0}
-    SelectVersion[SELECT stock, version<br/>WHERE id=stockId]
-    SaveProcessing[保存 seckill_result<br/>status=PROCESSING]
+    TxStart([开始事务])
+    Guard[创建/加载 seckill_reservation_guard<br/>PROCESSING + active_key=userId]
+    GuardDup{requestId 或 active_key 冲突?}
+    SelectBucket[选业务桶<br/>activity/sku -> bucketNo -> bucketShardKey]
+    AttachBucket[扣减前写 guard.bucket_shard_key]
+    SaveSnapshot[插入 snapshot<br/>status=DEDUCTED]
+    SaveOutbox[插入 seckill mq_message<br/>routingKey=seckill.order.create<br/>status=NEW]
+    Register[注册 afterCommit dispatch]
+    DeductBucket[UPDATE seckill_stock_bucket<br/>按 bucket_id + shard_key 扣减]
+    DeductOk{扣减成功?}
+    CheckEmpty[读取当前业务桶<br/>确认是否已空]
+    MarkEmpty[若已空: UPDATE seckill_stock_bucket<br/>status=EMPTY]
+    SignalEmpty[若标空成功: 发出 availability signal<br/>后台重建 survivor_buckets]
+    TryTransfer{请求触发调拨可恢复?}
+    SaveChange[插入 seckill_stock_change_log]
+    SaveProcessing[写 seckill_result=PROCESSING]
     Commit([提交事务])
-    Dispatch[提交后异步 publish<br/>失败保留 NEW/FAILED 等待补偿]
-    DuplicateReturn[返回 duplicate]
-    NotEnough[抛出库存不足<br/>事务回滚]
+    Dispatch[afterCommit 异步发 MQ]
+    MarkDeducted[guard PROCESSING -> DEDUCTED]
+    Rollback[回滚事务]
+    KeepProcessing[未知提交状态<br/>保留 PROCESSING 等 repair]
 
-    TxStart --> Duplicate --> IsDuplicate
-    IsDuplicate -- 是 --> DuplicateReturn
-    IsDuplicate -- 否 --> InsertSnapshot --> SaveOutbox --> RegisterDispatch --> UpdateStock --> Updated
-    Updated -- 否 --> NotEnough
-    Updated -- 是 --> SelectVersion --> SaveProcessing --> Commit --> Dispatch
+    Guard --> GuardDup
+    GuardDup -- 是 --> Rollback
+    GuardDup -- 否 --> SelectBucket --> AttachBucket --> TxStart --> SaveSnapshot --> SaveOutbox --> Register --> DeductBucket --> DeductOk
+    DeductOk -- 否 --> CheckEmpty --> MarkEmpty --> SignalEmpty --> TryTransfer
+    TryTransfer -- 是 --> DeductBucket
+    TryTransfer -- 否 --> Rollback
+    DeductOk -- 是 --> SaveChange --> SaveProcessing --> Commit --> MarkDeducted --> Dispatch
+    TxStart -. commit 状态未知 .-> KeepProcessing
 ```
 
-关键点：
+### 5.1 分桶模型
 
-- `seckill_sku.id` 是库存行主键，压测前已验证 `WHERE id = ?` 不再走二级索引回表。
-- `version` 每次库存变更递增，用来保护 TairString 缓存不被旧版本覆盖。
-- outbox 写入放在热点库存 `UPDATE` 前，保证消息账本和库存扣减同事务，同时尽量不延长热点行锁持有时间。
-- 如果库存不足，快照和 outbox 插入都会随事务回滚。
-- 如果 RabbitMQ 临时发送失败，不回滚已经提交的库存账本；消息保持 `NEW/FAILED`，由补偿任务继续发送。
+当前库存模型有两类桶：
 
-## 5. 异步建单和结果回传
+- `CENTER` 桶：总账桶，`bucket_no = 0`
+- `BUCKET` 桶：前台实际扣减的业务桶
+
+当前真实扣减只打到 `BUCKET` 桶。
+
+业务桶选择依赖 `seckill_bucket_config.survivor_buckets`：
+
+- `SeckillBucketService.selectBucket(...)` 先读取当前活动和 SKU 的 survivor 列表，再从存活业务桶里选择 `bucket_no`。
+- `survivor_buckets` 是最终一致的选桶索引，不是库存事实源；真实库存事实源仍是 `seckill_stock_bucket.status` 和 `seckill_stock_bucket.saleable_quantity`。
+- 当某个业务桶被打空时，请求线程只负责把 `seckill_stock_bucket` 条件标记为 `EMPTY`，并向 `SeckillBucketAvailabilityCoordinator` 发出可能已空信号。
+- 协调器按 `(activityId, skuId)` 合并信号，延迟短窗口后调用 `SeckillBucketReconcileService`，基于真实业务桶状态重建 survivor 列表。
+- 即使 survivor 短时间包含过期桶，选桶 SQL 仍通过 `status='ACTIVE' AND saleable_quantity > 0` 校验真实桶状态；本机短 TTL exhausted-bucket 缓存会减少尾段重复命中空桶。
+
+### 5.2 分片模型
+
+当前秒杀侧使用 ShardingSphere JDBC，把 OceanBase 拆成两个物理分片：
+
+- `ds0 = mall-oceanbase-ce`
+- `ds1 = mall-oceanbase-ce-shard1`
+
+当前业务路由键是 `bucket_shard_key`，它会贯穿：
+
+- `seckill_stock_bucket.shard_key`
+- `seckill_stock_snapshot.bucket_shard_key`
+- `seckill_stock_change_log.bucket_shard_key`
+- 秒杀侧 `mq_message.bucket_shard_key`
+- 订单结果消息 header / payload
+
+但 `seckill_reservation_guard` 不是按 `bucket_shard_key` 分片的库存事实表。当前 ShardingSphere 配置把它作为 single table 放在 `ds_0.seckill_reservation_guard`，从而让这些唯一约束具有全局语义：
+
+- `uk_guard_reservation(reservation_id)`
+- `uk_guard_request(request_id)`
+- `uk_guard_activity_active(activity_id, active_key)`
+
+当前 profile 下：
+
+- `physicalShardCount = 2`
+- `bucketShardKeys = 1..16`
+
+文档上可以把它理解成：
+
+```text
+业务桶先按 bucket_no 选桶，再由 bucket_shard_key 路由到 ds0/ds1
+```
+
+### 5.3 reservation guard
+
+`seckill_reservation_guard` 是“一个用户只能买一次”和 request 幂等的第一道事实源：
+
+- `PROCESSING`：guard 已创建，可能还没扣库存，也可能扣减事务状态未知。
+- `DEDUCTED`：扣减事务已知成功，等待订单结果。
+- `CONFIRMED`：正式订单已创建，`active_key` 继续保留，防止成功后重复购买。
+- `FAILED`：可以证明未扣库存，释放 `active_key`。
+- `RELEASED`：扣减后因为建单失败或订单关闭完成回补，释放 `active_key`。
+
+guard 状态推进都走 CAS：
+
+- `PROCESSING -> DEDUCTED`
+- `PROCESSING -> FAILED`
+- `PROCESSING/DEDUCTED -> CONFIRMED`
+- `DEDUCTED -> RELEASED`
+- `CONFIRMED -> RELEASED`
+
+关键约束是：不能把事务状态未知的 guard 一律改成 `FAILED`，否则可能释放一个实际已经扣减成功的用户资格。状态未知时保留 `PROCESSING`，让 repair 按 `bucket_shard_key` 和库存事实判断。
+
+### 5.4 stock snapshot 账本
+
+`seckill_stock_snapshot` 记录库存侧 reservation 事实：
+
+- `DEDUCTED`：业务桶已扣减，等待正式订单结果。
+- `CONFIRMED`：正式订单已创建。
+- `RELEASED`：建单失败或关单后库存已回补。
+
+当前代码允许：
+
+- 建单成功：`DEDUCTED -> CONFIRMED`
+- 建单失败：`DEDUCTED -> RELEASED`
+- 订单关闭/取消：`CONFIRMED -> RELEASED`
+
+`releaseDeduction(...)` 只释放 `DEDUCTED`；`releaseConfirmedDeduction(...)` 只释放 `CONFIRMED`。这条边界用来避免“失败消息乱序到达时释放已确认订单”。
+
+## 6. 异步建单和结果回传
 
 建单消息：
 
@@ -212,53 +360,270 @@ routingKey: seckill.order.result
 queue: mall.seckill.order.result.queue
 ```
 
-流程图：
+### 6.1 秒杀侧 outbox
+
+`mall-seckill` 不在请求线程里等待 RabbitMQ 端到端成功。
+
+当前实现是：
+
+- 事务内写秒杀侧 `mq_message = NEW`
+- 注册 `afterCommit` 回调
+- 事务提交后由异步线程立即发送 `seckill.order.create`
+- 发送前 CAS：`NEW/FAILED -> DISPATCHING`
+- Rabbit confirm ack 只允许 `DISPATCHING -> SENT`
+- Rabbit return、confirm nack、发送异常、发送超时只允许 `DISPATCHING -> FAILED`
+- confirm ack 不能覆盖已经被 return 或异常标记成 `FAILED` 的消息
+- `MessageCompensationJob` 后台扫描秒杀侧 OceanBase outbox 并补偿重发
+
+这部分对应的是“reservation 与建单消息可靠落库同事务，但真正发 MQ 不阻塞 HTTP 返回”。
+
+失败原因通过 `mq_message.error_type` 区分：
+
+- `RETURNED`：broker 收到但路由不到队列
+- `CONFIRM_NACK`：broker 未确认接收成功
+- `SEND_EXCEPTION`：发送侧异常
+- `TIMEOUT`：`DISPATCHING` 超过超时时间后由补偿任务兜底改为失败
+
+### 6.2 订单侧建单与关单消息
+
+`mall-order` 消费 `seckill.order.create` 后，会在 MySQL 本地事务里做这些事：
+
+1. `consume_record.markIfAbsent(reservationId)` 做消费幂等。
+2. 通过 `order_info(source='SECKILL', source_id=reservationId)` 做业务幂等。
+3. 生成正式订单号 `OrderNoGenerator.next("S")`。
+4. 写 `seckill_order(reservation_id, bucket_shard_key, order_sn)`。
+5. 写 `order_info / order_item`。
+6. 写订单侧结果 outbox `seckill.order.result`。
+7. 写延迟关单消息 `order.close.delay`。
+
+当前正式订单号生成器已经切到：
+
+```text
+prefix + UUID 全局唯一 ID
+```
+
+不再使用“毫秒时间戳 + 4 位随机数”。
+
+这里有一个容易误读的边界：
+
+- `seckill.order.result` 在订单事务里是通过 `enqueueSeckillOrderResult(...)` 落 MySQL outbox，再走补偿/发送模型。
+- `order.close.delay` 当前是通过 `publishOrderCloseDelay(...)` 立即保存并同步发送，不走 `afterCommit enqueue` 这条路径。
+
+订单侧同样开启了 `MessageCompensationJob`，所以 MySQL 里的 `seckill.order.result` 和 `order.close.delay` 也有本地 outbox 补偿能力。
+
+### 6.3 订单结果回传
+
+订单侧结果消息当前主要有三种状态：
+
+- `SUCCESS`
+- `FAILED`
+- `CANCELED`，结果消费者同时兼容 `ORDER_CLOSED`、`ORDER_CANCELED`
+
+它们对应的库存侧动作：
+
+- `SUCCESS`：`confirmDeduction`，必须得到 `CONFIRMED` snapshot 后才写 `seckill_result=SUCCESS`，并把 guard 推进到 `CONFIRMED`，继续占用 `active_key`。
+- `FAILED`：`releaseDeduction`，只允许释放 `DEDUCTED` snapshot，并把 guard 从 `DEDUCTED` 推进到 `RELEASED`。
+- `CANCELED / ORDER_CLOSED / ORDER_CANCELED`：`releaseConfirmedDeduction`，只允许释放 `CONFIRMED` snapshot，并把 guard 从 `CONFIRMED` 推进到 `RELEASED`。
+
+如果 `SUCCESS` 到达时查不到 snapshot，或 snapshot 已不是可确认状态，结果消费者会抛异常进入延迟重试/DLQ 流程，不会盲写 `SUCCESS`。
 
 ```mermaid
 sequenceDiagram
     participant S as mall-seckill
-    participant OB as OceanBase/MySQL
-    participant D as afterCommit dispatcher
-    participant C as MessageCompensationJob
+    participant OB as OceanBase
     participant MQ as RabbitMQ
     participant O as mall-order
-    participant DB as Order DB
+    participant MY as MySQL
     participant R as SeckillResultMessageListener
-    participant T as TairString
 
-    S->>OB: recordDeduction + mq_message NEW<br/>同事务提交
-    S-->>D: afterCommit dispatchAsync
-    D->>MQ: publish seckill.order.create(requestId)
-    C->>OB: 扫描 NEW/FAILED outbox
-    C->>MQ: resend 未确认消息
-    MQ->>O: 消费 mall.seckill.order.create.queue
-    O->>DB: @Transactional<br/>consume_record + seckill_order + order_info + order_item
-    alt 订单创建成功
-        O->>MQ: publish seckill.order.result SUCCESS(orderSn)
-        MQ->>R: 消费结果消息
-        R->>OB: confirmDeduction<br/>DEDUCTED -> CONFIRMED
+    S->>OB: guard(PROCESSING+bucket_shard_key) + snapshot(DEDUCTED) + outbox NEW + bucket deduct
+    S->>MQ: afterCommit / compensation 发送 seckill.order.create
+    MQ->>O: 消费建单消息
+    O->>MY: consume_record + seckill_order + order_info + order_item
+
+    alt 建单成功
+        O->>MY: 写 seckill.order.result outbox(SUCCESS)
+        O->>MQ: 发送 SUCCESS
+        MQ->>R: 消费 SUCCESS
+        R->>OB: snapshot DEDUCTED -> CONFIRMED; guard -> CONFIRMED(active_key 保留)
         R->>OB: saveResult SUCCESS
-    else 订单创建失败
-        O->>MQ: publish seckill.order.result FAILED
-        MQ->>R: 消费结果消息
-        R->>OB: releaseDeduction<br/>DEDUCTED -> RELEASED<br/>回补 seckill_sku.stock
-        R->>T: 按新 version 刷新库存缓存
+    else 建单失败
+        O->>MY: 写 seckill.order.result outbox(FAILED)
+        O->>MQ: 发送 FAILED
+        MQ->>R: 消费 FAILED
+        R->>OB: snapshot DEDUCTED -> RELEASED; guard DEDUCTED -> RELEASED
+        R->>OB: 回补业务桶
         R->>OB: saveResult FAILED
-    else 短暂不可见或重复消费但订单未查到
-        O-->>MQ: basicNack requeue=true<br/>不发布 FAILED 结果
+    else 未支付超时关闭
+        O->>MY: 订单 CLOSED
+        O->>MY: 写 seckill.order.result outbox(CANCELED)
+        O->>MQ: 发送 CANCELED
+        MQ->>R: 消费 CANCELED
+        R->>OB: snapshot CONFIRMED -> RELEASED; guard CONFIRMED -> RELEASED
+        R->>OB: 回补业务桶
+        R->>OB: saveResult CANCELED
     end
 ```
 
-异常路径：
+消费者重试语义也要单独记清楚：
 
-- `mall-seckill` 请求线程只负责 outbox 可靠落库；RabbitMQ 临时发送失败不会立即 `releaseDeduction`，而是由 outbox 补偿任务重发。
-- `mq_message` 落库失败：库存扣减事务回滚，请求不会返回已受理的 `ACCEPTED`。
-- `mall-order` 消费建单时，`createSeckillOrder` 在本地事务里处理 `consume_record / seckill_order / order_info / order_item`。
-- `mall-order` 遇到 `Order not found` 或 `Seckill message already consumed` 这类短暂不可见/幂等查询未收敛异常：`basicNack(requeue=true)`，不发布失败结果，避免误释放库存。
-- `mall-order` 遇到非重试失败：发布失败结果消息，然后当前消息 `basicNack(requeue=false)`。队列配置了死信队列，最终失败消息进入 DLQ。
-- `mall-seckill` 消费结果失败：`basicNack(requeue=false)`，结果消息进入结果 DLQ。
+- `mall-order` 消费 `seckill.order.create` 时，如果异常被识别为 `404/409` 这类短暂不可见或幂等未收敛问题，会 `basicNack(requeue=true)`，不发布失败结果。
+- `mall-order` 遇到非重试失败，会先发布 `FAILED` 结果，再 `basicNack(requeue=false)`，让原始建单消息进入 DLQ。
+- `mall-seckill` 消费 `seckill.order.result` 失败时，当前 profile 开启 `result-retry.enabled=true`：先写 `seckill_result_retry`，按 `5s / 30s / 2m / 10m` 延迟重试，并 `basicAck` 原消息；超过 `max-attempts=4` 后把 retry 记录标为 `DLQ` 并告警。
+- 只有结果重试关闭、消息无法解析到 reservation，或 retry 记录本身无法安全落库时，才 `basicNack(requeue=false)` 交给 Rabbit 结果 DLQ。
+- `mall-order` 消费 `order.close` 失败时，同样是 `basicNack(requeue=false)`。
 
-## 6. 库存缓存链路
+### 6.4 一个当前实现上的重要边界
+
+跨服务 outbox 当前只保证：
+
+- 生产方本地事务内可靠落库
+- RabbitMQ confirm / return 维度的发送确认
+- 生产方自己的补偿任务能继续重发 `NEW/FAILED`
+- 长时间停留在 `DISPATCHING` 的消息会先按 `TIMEOUT` 标记为 `FAILED`，再进入补偿重发
+- 每次实际发送都必须先 CAS 到 `DISPATCHING`，ack/return/nack/exception 再基于 `DISPATCHING` 做 CAS 收口
+
+它不再做“对端消费成功后回写生产方 outbox = CONSUMED”。
+
+所以现在的口径是：
+
+- 秒杀侧建单 outbox 最终通常停在 `SENT`
+- 订单侧结果 outbox 最终通常也停在 `SENT`
+- 延迟关单消息在未到期前也会停在 `SENT`
+- 真正的消费幂等由消费方自己的 `consume_record` 和业务唯一键承担
+
+这是当前“OceanBase 秒杀库 + MySQL 订单库”跨库边界下的真实实现。
+
+## 7. 后台治理能力
+
+这些能力已经实现，但要看开关是否打开。
+
+### 7.1 中心桶异步总账
+
+组件：
+
+- `SeckillCenterBucketLedgerConsumer`
+- `SeckillCenterBucketLedgerApplier`
+
+流程：
+
+1. 扫描 `seckill_stock_change_log.status = NEW`
+2. 先把日志 claim 成 `PROCESSING`
+3. 按 `(activityId, skuId)` 聚合 `quantity_delta`
+4. 更新中心桶 `saleable_quantity`
+5. 把消费成功的变更日志改成 `APPLIED`
+
+当前配置：
+
+```text
+mall.seckill.bucket.center-ledger.enabled=true
+```
+
+当前 `stage3c-sharding` profile 默认启动中心总账消费者；中心桶仍是异步总账，不重新进入 C 端实时扣减路径。
+
+### 7.2 请求触发调拨
+
+组件：
+
+- `SeckillBucketService`
+- `SeckillBucketTransferService`
+
+行为：
+
+- 如果当前桶扣减失败，可以按配置尝试把库存从其他业务桶调拨过来，再继续扣减。
+
+当前配置：
+
+```text
+mall.seckill.bucket.transfer.enabled=true
+mall.seckill.bucket.transfer.max-attempts=1
+```
+
+当前运行态默认开启请求触发调拨。它不替代 guard 或库存事实源，只在目标桶被打空时做低频尾部兜底；调拨锁依赖 Redisson，但与用户提交短锁是两条不同路径。
+
+### 7.3 后台自动调拨
+
+组件：
+
+- `SeckillBucketAutoTransferService`
+- `SeckillBucketAutoTransferJob`
+
+行为：
+
+- 后台按低水位扫描目标桶
+- 找富余源桶
+- 生成 `TRANSFER_OUT / TRANSFER_IN` 变更日志
+- 发出 availability signal，由后台协调器重建 survivor buckets
+
+当前配置：
+
+```text
+mall.seckill.bucket.auto-transfer.enabled=true
+```
+
+当前运行态默认开启后台自动调拨，用来把富余桶库存搬到低水位桶。
+
+### 7.4 可用性协调 / survivor 重建
+
+组件：
+
+- `SeckillBucketAvailabilityCoordinator`
+- `SeckillBucketReconcileService`
+- `SeckillBucketReconcileJob`
+
+行为：
+
+- submit/release/transfer 路径只发出可能已空或可能可用的 availability signal
+- 协调器按 `(activityId, skuId)` 合并信号，短延迟后调用 `SeckillBucketReconcileService`
+- 基于业务桶实际库存和状态重建 survivor 列表
+- 把正库存桶重新置回 `ACTIVE`
+- 把空桶置回 `EMPTY`
+
+当前配置：
+
+```text
+mall.seckill.bucket.availability.enabled=true
+mall.seckill.bucket.reconcile.enabled=false
+```
+
+当前运行态默认启用 availability coordinator，关闭全量定时 reconcile。`survivor_buckets` 因此是最终一致的路由索引，`seckill_stock_bucket` 仍是库存事实源。
+
+### 7.5 reservation guard repair
+
+组件：
+
+- `SeckillReservationRepairJob`
+- `ReservationGuardRepository`
+- `SeckillRepository`
+- `SeckillStockChangeLogMapper`
+- `ReliableMessageRepository`
+
+当前配置：
+
+```text
+mall.seckill.reservation-guard.enabled=true
+mall.seckill.reservation-guard.processing-probe-after-seconds=30
+mall.seckill.reservation-guard.safe-release-after-seconds=300
+mall.seckill.reservation-guard.repair-fixed-delay=60000
+```
+
+repair 只扫描长时间停留在 `PROCESSING` 的 guard，原则是“能证明没扣才释放，不能证明没扣就继续占用”。
+
+处理规则：
+
+- guard 还没有 `bucket_shard_key`：说明还没完成选桶附着，超过安全释放窗口后才 `PROCESSING -> FAILED` 并释放 `active_key`。
+- snapshot=`CONFIRMED`：guard 推进到 `CONFIRMED`，继续占用 `active_key`。
+- snapshot=`RELEASED`：guard 推进到 `RELEASED`，释放 `active_key`。
+- snapshot=`DEDUCTED` 且建单 outbox、change_log 都存在：guard 推进到 `DEDUCTED`。
+- snapshot=`DEDUCTED` 但 outbox 或 change_log 缺失：记录错误并保留 `PROCESSING`，不释放资格。
+- 没有 snapshot，但查到 outbox 或 change_log：记录错误并保留 `PROCESSING`。
+- 没有 snapshot、没有 outbox、没有 change_log，且已超过安全释放窗口：`PROCESSING -> FAILED` 并释放 `active_key`。
+
+如果分片不可达、查询异常或事实不完整，repair 不把 guard 释放掉。
+
+## 8. 缓存和保护开关
+
+### 8.1 TairString 库存缓存
 
 缓存 key：
 
@@ -266,168 +631,135 @@ sequenceDiagram
 seckill:stock-cache:{activityId}:{skuId}
 ```
 
-缓存写入：
+当前代码的缓存定位：
+
+- 不是库存事实源
+- 只做售罄快速失败和版本保护
+- 写缓存失败不会回滚数据库事务
+
+当前 `stage3c-sharding` profile 已经打开：
 
 ```text
-EXSET key stock ABS version
+mall.seckill.stock-cache.enabled=true
+mall.seckill.stock-cache.repair.enabled=true
 ```
 
-当前代码通过 Lua 包装 TairString：
+所以当前压测链路里，库存缓存不再是纯旁路；它负责售罄快速失败和后台追平。但它仍不是库存事实源，写缓存失败不会回滚 OceanBase 事务。
 
-- `EXGET` 读取当前 `value/version`。
-- 如果已有版本大于等于新版本，则拒绝覆盖。
-- 如果新版本更新，则执行 `EXSET ... ABS version`。
+### 8.2 Redisson 用户维度短锁
 
-流程图：
+当前代码仍然支持：
 
-```mermaid
-flowchart TD
-    DeductDone[数据库扣减或回补完成]
-    Version[得到 stock/version]
-    Enabled{stock-cache.enabled?}
-    Exget[EXGET 当前缓存]
-    Compare{缓存版本 >= 数据库版本?}
-    Skip[跳过写入<br/>避免旧值覆盖新值]
-    Exset[EXSET stock ABS version]
-    Done([完成])
-
-    DeductDone --> Version --> Enabled
-    Enabled -- 否 --> Done
-    Enabled -- 是 --> Exget --> Compare
-    Compare -- 是 --> Skip --> Done
-    Compare -- 否 --> Exset --> Done
+```text
+seckill:submit:lock:{activityId}:{skuId}:{userId}
 ```
 
-缓存定位：
+它只保护“同一用户重复并发提交”。
 
-- 它不是库存事实源。
-- 它用于售罄快速失败和读优化。
-- 写缓存失败不会回滚数据库事务。
+但当前 profile：
 
-## 7. stock-only 压测链路
+```text
+mall.seckill.lock.enabled=false
+```
 
-入口：
+所以压测时不会经过这层用户短锁。需要注意的是：由于 `bucket.transfer.enabled=true`、`bucket.auto-transfer.enabled=true`，当前运行态仍会创建 `RedissonClient`，供桶调拨锁使用。
+
+### 8.3 热点保护和 Sentinel
+
+热点识别和 Sentinel 仍然在主提交入口生效，只是压测 profile 把阈值放得很高，避免它成为当前吞吐瓶颈。当前 `SeckillHotspotGuard` 内部用 `Caffeine` 维护热点 SKU 到 `Semaphore` 的本地门闸缓存，避免本地热点门闸对象无限增长；是否真正启用这层门闸，还要看 `mall.seckill.hotspot.enabled`。
+
+## 9. 压测入口和结果口径
+
+### 9.1 内部压测入口
+
+当前代码里有四条内部探针：
 
 ```text
 POST /internal/seckill/loadtest/stock-deduct/{activityId}/{skuId}
+POST /internal/seckill/loadtest/stock-deduct-tx-update-select/{activityId}/{skuId}
+POST /internal/seckill/loadtest/stock-deduct-update-only/{activityId}/{skuId}
+POST /internal/seckill/loadtest/bucket-deduct-only/{activityId}/{skuId}
 ```
 
-启用条件：
+它们的用途分别是：
+
+- 单行库存扣减
+- 单行库存“事务内 update + select”
+- 单行库存纯 update
+- 业务桶纯扣减
+
+### 9.2 完整 submit 压测
+
+完整链路压测用的是：
+
+- `target/loadtest/reset-stage3c-async.ps1`
+- `target/loadtest/run-stage3c-submit-async.ps1`
+- `target/loadtest/measure_async_consumer.ps1`
+
+压测口径要分两段看：
+
+- HTTP submit 入口吞吐
+- 异步建单 / 结果回写的追平速度
+
+### 9.3 当前结果判断口径
+
+在当前跨库实现里，判断秒杀主链路是否闭环，应该优先看：
+
+- `seckill_stock_snapshot`
+- `seckill_result`
+- `order_info`
+- `seckill_order`
+- Rabbit 主队列是否清零
+
+不应该再把“生产方 `mq_message` 最终必须变 `CONSUMED`”作为验收条件，因为当前实现不是这么设计的。
+
+## 10. 当前关键结论
+
+当前代码实现可以概括成：
 
 ```text
-mall.seckill.load-test.stock-deduct-enabled=true
+同步用全局 guard 占用秒杀资格并扣分桶库存，
+异步在 MySQL 创建正式订单，
+再用结果消息把 OceanBase reservation 确认或释放。
 ```
 
-流程图：
+更具体的结论：
 
-```mermaid
-flowchart TD
-    JMeter[JMeter]
-    InternalApi[InternalSeckillLoadTestController]
-    Enabled{压测入口是否启用}
-    Resolve[首次按 activityId+skuId<br/>解析 stockId]
-    Cache[本地缓存 stockId]
-    Repo[SeckillRepository.deductStockOnly]
-    TimerTotal[Micrometer Timer<br/>total]
-    TimerUpdate[Micrometer Timer<br/>update]
-    Update[UPDATE seckill_sku<br/>WHERE id=stockId AND stock>=1]
-    TimerSelect[Micrometer Timer<br/>select]
-    Select[SELECT stock, version<br/>WHERE id=stockId]
-    Response[返回 deducted/stock/version]
+- 秒杀资格事实源在 OceanBase，不在 Redis。
+- 重复购买的强约束在 `seckill_reservation_guard`，当前是 ShardingSphere single table；`CONFIRMED` 后继续保留 `active_key`。
+- 正式订单事实源在 MySQL，不在 OceanBase 秒杀库。
+- 业务桶是前台扣减热点，中心桶只是可选的异步总账。
+- `bucket_shard_key` 是库存侧和订单侧跨服务对齐的关键路由凭证。
+- 结果消费者区分建单失败和订单关闭：前者只释放 `DEDUCTED`，后者只释放 `CONFIRMED`。
+- RabbitMQ 可靠消息使用 `DISPATCHING -> SENT/FAILED` 的 CAS 状态机，confirm ack 不能覆盖 return/nack/exception 已经写入的失败状态。
+- 结果消费失败走 `seckill_result_retry` 延迟重试和最大次数兜底，不做无限 requeue。
+- 当前默认运行态已经是 Stage3C 风格的“分桶 + 分片 + 异步建单”架构。
 
-    JMeter --> InternalApi --> Enabled
-    Enabled -- 否 --> Response
-    Enabled -- 是 --> Resolve --> Cache --> Repo --> TimerTotal
-    TimerTotal --> TimerUpdate --> Update --> TimerSelect --> Select --> Response
-```
+当前还要注意两个实现层面的现实：
 
-和正式秒杀提交链路的区别：
+- 中心总账、请求触发调拨、自动调拨、availability coordinator 都已经纳入当前 `stage3c-sharding` 运行态；全量定时 `reconcile` 仍默认关闭，需要单独压测验证。
+- `mall-order` 的建单消费对部分短暂异常仍会 `basicNack(requeue=true)`，这是订单建单侧的现实现状，不等同于结果消费者的延迟重试模型。
 
-- 不走 Sentinel。
-- 不走 Redisson。
-- 不写 `seckill_stock_snapshot`。
-- 不写 `seckill_result`。
-- 不刷新 TairString。
-- 不发 RabbitMQ。
-- 只测 `HTTP + Spring MVC + MyBatis + OceanBase 热点行 UPDATE + SELECT`。
-
-因此，最近 `docs/performance-testing.md` 中的 stock-only QPS 只能代表库存扣减主链路压测结果，不能代表完整秒杀业务链路吞吐。
-
-## 8. 当前关键结论
-
-当前链路可以概括为：
-
-```text
-同步定资格、扣库存并落 outbox，异步建订单，结果回传做最终确认或释放。
-```
-
-更细一点：
-
-- 秒杀成功的即时证明是 `requestId + ACCEPTED`，不是订单号。
-- 订单号由 `mall-order` 异步创建后通过结果消息回传。
-- `seckill_sku.stock` 已经在 HTTP 提交事务内同步扣减。
-- 如果异步建单非重试失败，会通过失败结果消息触发 `releaseDeduction` 把库存回补。
-- 如果 RabbitMQ 临时发送失败，请求线程不立即释放库存，`mq_message` outbox 会补偿重发。
-- 如果用户查询结果时还没有结果记录，接口会返回 `PROCESSING`。
-
-当前主要性能瓶颈：
-
-- stock-only 阶梯压测显示，`100 -> 150` 并发开始出现明显收益骤降。
-- `update` Timer 基本等于 `total` Timer，说明应用线程主要耗时集中在等待热点行 `UPDATE` 调用返回；这里包含数据库热点行排队，并不等同于 OceanBase 裸 SQL 执行耗时。
-- `select` 通常是个位到十几毫秒，不是当前主瓶颈。
-- `1000` 并发档出现 JMeter 客户端 `Address already in use`，不能直接视为服务端上限。
-
-正式链路新增分段指标：
-
-| 指标 | 含义 |
-| --- | --- |
-| `seckill.submit.total` | 正式提交入口总耗时 |
-| `seckill.submit.sentinel` | Sentinel 入口保护耗时 |
-| `seckill.submit.metadata` | 活动和 SKU 元数据读取耗时 |
-| `seckill.submit.lock` | Redisson 用户重复提交锁耗时 |
-| `seckill.submit.stock-cache.sold-out` | TairString 售罄快速失败判断耗时 |
-| `seckill.submit.record.total` | 库存扣减事务总耗时 |
-| `seckill.submit.record.duplicate` | 重复购买账本检查耗时 |
-| `seckill.submit.record.snapshot.insert` | 扣减快照写入耗时 |
-| `seckill.submit.record.stock.update` | 主键库存扣减 `UPDATE` 耗时 |
-| `seckill.submit.record.stock.select` | 扣减后 `stock/version` 查询耗时 |
-| `seckill.submit.result.save` | 结果表写入或更新耗时 |
-| `seckill.submit.stock-cache.refresh` | TairString 版本缓存刷新耗时 |
-| `seckill.submit.mq.publish` | outbox 入队和 afterCommit 注册耗时；名称沿用历史，不代表 RabbitMQ 端到端发布耗时 |
-| `seckill.submit.release.*` | 订单失败结果触发的库存释放路径耗时 |
-
-正式链路压测脚本：
-
-```powershell
-& "C:\Program Files\apache-jmeter-5.6.3\bin\jmeter.bat" `
-  -n `
-  -t docs/jmeter/seckill-submit.jmx `
-  -Jhost=localhost `
-  -Jport=8105 `
-  -JactivityId=1 `
-  -JskuId=1001 `
-  -Jthreads=100 `
-  -Jloops=10 `
-  -Jramp=2 `
-  -JuserIdStart=1000000 `
-  -l target/loadtest/jmeter-seckill-submit.jtl `
-  -e `
-  -o target/loadtest/jmeter-report-seckill-submit
-```
-
-## 9. 代码锚点
+## 11. 代码锚点
 
 | 模块 | 文件 | 说明 |
 | --- | --- | --- |
-| 秒杀 HTTP 入口 | `mall-seckill/src/main/java/com/mall/seckill/controller/SeckillController.java` | 活动列表、秒杀提交、结果查询 |
-| 提交流程编排 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillServiceImpl.java` | Sentinel、热点保护、Redisson、扣减、缓存刷新、outbox 入队 |
-| 库存事务账本 | `mall-seckill/src/main/java/com/mall/seckill/mapper/SeckillRepository.java` | `recordDeduction`、outbox hook、`confirmDeduction`、`releaseDeduction`、stock-only |
-| 库存 SQL | `mall-seckill/src/main/java/com/mall/seckill/mapper/SeckillSkuMapper.java` | 主键扣减、版本查询、回补 |
-| TairString 缓存 | `mall-seckill/src/main/java/com/mall/seckill/cache/SeckillStockCache.java` | 售罄快速失败、版本缓存刷新 |
-| TairString 命令 | `mall-seckill/src/main/java/com/mall/seckill/cache/RedisTairStringCommands.java` | `EXGET/EXSET` Lua 包装 |
-| 结果消费 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillResultMessageListener.java` | 消费订单结果并确认或释放快照 |
-| 建单消费 | `mall-order/src/main/java/com/mall/order/service/impl/OrderMessageListener.java` | 消费秒杀建单消息并回传结果 |
-| 秒杀订单创建 | `mall-order/src/main/java/com/mall/order/service/impl/OrderServiceImpl.java` | 幂等创建秒杀订单 |
-| 消息常量 | `mall-message/src/main/java/com/mall/message/MessageNames.java` | exchange、queue、routing key |
-| 可靠消息发布 | `mall-message/src/main/java/com/mall/message/ReliableMessagePublisher.java` | 保存 outbox、afterCommit 异步发送、confirm/return 回调 |
-| 消息补偿任务 | `mall-message/src/main/java/com/mall/message/MessageCompensationJob.java` | 定时扫描 `NEW/FAILED` 消息并重发 |
+| 秒杀 HTTP 入口 | `mall-seckill/src/main/java/com/mall/seckill/controller/SeckillController.java` | 秒杀提交、结果查询 |
+| 秒杀主流程 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillServiceImpl.java` | 热点保护、Sentinel、可选锁、requestId 幂等、guard 创建和 bucket 附着 |
+| 资格 guard | `mall-seckill/src/main/java/com/mall/seckill/mapper/ReservationGuardRepository.java` | `PROCESSING/DEDUCTED/CONFIRMED/FAILED/RELEASED` CAS 推进 |
+| 秒杀事务账本 | `mall-seckill/src/main/java/com/mall/seckill/mapper/SeckillRepository.java` | `recordDeduction`、`confirmDeduction`、`releaseDeduction`、`releaseConfirmedDeduction` |
+| 业务桶路由和扣减 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillBucketService.java` | 选桶、扣减、回补、聚合读开关 |
+| 请求调拨 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillBucketTransferService.java` | 请求触发调拨 |
+| 自动调拨 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillBucketAutoTransferService.java` | 后台自动调拨 |
+| 碎片整理 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillBucketReconcileService.java` | survivor 重建 |
+| guard repair | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillReservationRepairJob.java` | PROCESSING guard 的事实核查和安全释放 |
+| 中心总账 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillCenterBucketLedgerConsumer.java` `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillCenterBucketLedgerApplier.java` | 中心桶异步总账 |
+| 库存缓存 | `mall-seckill/src/main/java/com/mall/seckill/cache/SeckillStockCache.java` | TairString 读写 |
+| 结果消费 | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillResultMessageListener.java` | 处理 `SUCCESS/FAILED/CANCELED/ORDER_CLOSED/ORDER_CANCELED` |
+| 结果重试 | `mall-seckill/src/main/java/com/mall/seckill/mapper/SeckillResultRetryRepository.java` | `seckill_result_retry` 延迟重试、最大次数和 DLQ 状态 |
+| 建单消费 | `mall-order/src/main/java/com/mall/order/service/impl/OrderMessageListener.java` | 消费 `seckill.order.create` |
+| 订单事务 | `mall-order/src/main/java/com/mall/order/service/impl/OrderServiceImpl.java` | MySQL 建单、结果 outbox、关单回传 |
+| 订单仓储 | `mall-order/src/main/java/com/mall/order/mapper/OrderRepository.java` | `source_id` 幂等、`seckill_order` 绑定 |
+| 可靠消息 | `mall-message/src/main/java/com/mall/message/ReliableMessagePublisher.java` `mall-message/src/main/java/com/mall/message/ReliableMessageRepository.java` `mall-message/src/main/java/com/mall/message/MessageCompensationJob.java` | outbox、`DISPATCHING` CAS、confirm/return/timeout、补偿 |
+| Rabbit 配置 | `mall-message/src/main/java/com/mall/message/RabbitMessageConfig.java` | 秒杀建单/结果队列并发 |
+| 压测入口 | `mall-seckill/src/main/java/com/mall/seckill/controller/InternalSeckillLoadTestController.java` | stock-only / bucket-only 探针 |

@@ -19,7 +19,9 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.math.BigDecimal;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -48,8 +50,8 @@ class OrderMessageListenerTest {
 
         listener.onSeckillOrderCreate(objectMapper.writeValueAsString(request), message(), channel);
 
-        verify(messagePublisher, never()).publishSeckillOrderResult(anyString(), anyString());
-        verify(messageRepository, never()).markConsumed(anyString());
+        verify(messagePublisher, never()).publishSeckillOrderResult(anyString(), anyString(), any());
+        verify(messageRepository, never()).markConsumed(anyString(), any());
         verify(channel).basicNack(7L, false, true);
     }
 
@@ -63,9 +65,10 @@ class OrderMessageListenerTest {
         listener.onSeckillOrderCreate(objectMapper.writeValueAsString(request), message(), channel);
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(messagePublisher).publishSeckillOrderResult(anyString(), payloadCaptor.capture());
+        verify(messagePublisher).publishSeckillOrderResult(eq("r1"), payloadCaptor.capture(), eq(3L));
         assertThat(payloadCaptor.getValue()).contains("\"status\":\"FAILED\"");
         assertThat(payloadCaptor.getValue()).contains("\"message\":\"bad request\"");
+        assertThat(payloadCaptor.getValue()).contains("\"bucketShardKey\":3");
         verify(channel).basicNack(7L, false, false);
     }
 
@@ -79,7 +82,7 @@ class OrderMessageListenerTest {
     }
 
     private SeckillOrderRequest request() {
-        return new SeckillOrderRequest("r1", 1L, 101L, 1001L, "phone", BigDecimal.valueOf(99), 1);
+        return new SeckillOrderRequest("r1", 1L, 101L, 1001L, "phone", BigDecimal.valueOf(99), 1, 3L);
     }
 
     private Message message() {

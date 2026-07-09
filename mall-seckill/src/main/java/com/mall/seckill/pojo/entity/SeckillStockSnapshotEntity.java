@@ -15,6 +15,16 @@ public class SeckillStockSnapshotEntity {
 
     private Long stockId;
 
+    private Long bucketId;
+
+    private Integer bucketNo;
+
+    private Long bucketShardKey;
+
+    private Long strategyVersion;
+
+    private Long changeId;
+
     private Long activityId;
 
     private Long skuId;

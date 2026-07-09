@@ -26,37 +26,23 @@ docker compose up -d --force-recreate mysql canal
 
 重建会清空容器内演示数据，之后重新导入 `schema.sql` 即可。
 
-已有旧表结构时，先执行当前版本迁移脚本：
+已有旧表结构时，先按版本顺序执行当前迁移脚本：
 
 ```powershell
 docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v2-mybatis-message.sql"
-```
-
-如果旧库的 `cart_item` 表还没有 `sku_name`、`price` 字段，再执行：
-
-```powershell
 docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v3-cart-mysql.sql"
-```
-
-如果旧库还没有商品详情回源和缓存失效反查所需索引，再执行：
-
-```powershell
 docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v4-product-indexes.sql"
-```
-
-如果旧库还没有评价摘要和商品优惠券表，再执行：
-
-```powershell
 docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v5-review-coupon.sql"
-```
-
-如果旧库还没有 Seata TCC Fence 表，再执行：
-
-```powershell
 docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v6-seata-tcc.sql"
+docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v7-seckill-snapshot-stock-id.sql"
+docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v8-seckill-snapshot-active-key.sql"
+docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v9-seckill-stage3-buckets.sql"
+docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v10-seckill-stage3c-sharded-outbox.sql"
+docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v11-seckill-reservation-order-source.sql"
+docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v12-seckill-asset-risk-stopgap.sql"
 ```
 
-迁移脚本会重建 `mq_message`、`consume_record` 和秒杀相关表，适合本地演示库升级。
+迁移脚本会补齐 `mq_message`、`consume_record`、分桶库存、reservation guard、结果重试等结构，适合本地演示库升级。新库可以直接导入 `sql/schema.sql` 和 `sql/seed-demo-data.sql`。
 
 如果创建订单或消息补偿任务报下面这类错误，说明当前库里的 `mq_message` 还是旧表结构，也执行同一个迁移脚本：
 
@@ -71,7 +57,7 @@ Unknown column 'exchange_name' in 'field list'
 ```bash
 curl -s -X POST "http://localhost:8080/api/auth/login" \
   -H "Content-Type: application/json" \
-  --data-raw '{"username":"alice","password":"123456"}'
+  --data-raw '{"username":"alice","password":"demo123"}'
 ```
 
 复制返回结果里的 `data.token`：
@@ -106,14 +92,17 @@ curl -s -X POST "http://localhost:8080/api/order/create" \
 ```bash
 curl -s "http://localhost:8080/api/seckill/activities"
 
+REQUEST_ID="demo-seckill-$(date +%s)"
+
 curl -s -X POST "http://localhost:8080/api/seckill/1/1001" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Request-Id: $REQUEST_ID"
 ```
 
-提交成功后会先返回 `ACCEPTED`，说明秒杀请求已受理。复制返回结果里的 `data.requestId`：
+提交成功后会先返回 `ACCEPTED`，说明秒杀请求已受理。若未传 `X-Request-Id`，复制返回结果里的 `data.requestId`：
 
 ```bash
-REQUEST_ID="替换成秒杀接口返回的requestId"
+REQUEST_ID="替换成秒杀接口返回的requestId，已传请求头时可继续使用上面的值"
 
 curl -s "http://localhost:8080/api/seckill/result/$REQUEST_ID" \
   -H "Authorization: Bearer $TOKEN"
@@ -123,7 +112,8 @@ curl -s "http://localhost:8080/api/seckill/result/$REQUEST_ID" \
 
 - `PROCESSING`：订单服务还没消费完秒杀下单消息，或秒杀服务还没消费到结果消息。
 - `SUCCESS`：订单已创建，`orderSn` 有值。
-- `FAILED`：订单创建失败或重复消费被拒绝。
+- `FAILED`：请求未扣库存、订单创建失败或重复购买被拒绝。
+- `CANCELED`：订单创建后超时关闭或取消，库存已按已确认订单路径回补。
 
 ## Canal 缓存失效验证
 
