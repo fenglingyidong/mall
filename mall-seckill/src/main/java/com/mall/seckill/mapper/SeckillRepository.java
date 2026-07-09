@@ -310,7 +310,7 @@ public class SeckillRepository {
                                                           Long skuId,
                                                           SeckillBucketService.SelectedBucket selectedBucket,
                                                           int quantity) {
-        if (hasDeductFact(requestId)) {
+        if (hasDeductChangeLog(requestId)) {
             return StockDeductionResult.duplicate();
         }
         try {
@@ -445,13 +445,16 @@ public class SeckillRepository {
         if (snapshot == null) {
             return null;
         }
-        if ("DEDUCTED".equals(snapshot.getStatus())) {
+        String currentStatus = snapshot.getStatus();
+        boolean confirmable = "DEDUCTED".equals(currentStatus)
+                || ("REGISTERED".equals(currentStatus) && hasDeductChangeLog(requestId));
+        if (confirmable) {
             LocalDateTime now = LocalDateTime.now();
             String resultMessage = messageOrDefault(message, "Order created");
             int updated = snapshotMapper.update(null, Wrappers.<SeckillStockSnapshotEntity>lambdaUpdate()
                     .eq(SeckillStockSnapshotEntity::getRequestId, requestId)
                     .eq(bucketShardKey != null, SeckillStockSnapshotEntity::getBucketShardKey, bucketShardKey)
-                    .eq(SeckillStockSnapshotEntity::getStatus, "DEDUCTED")
+                    .eq(SeckillStockSnapshotEntity::getStatus, currentStatus)
                     .set(SeckillStockSnapshotEntity::getStatus, "CONFIRMED")
                     .set(SeckillStockSnapshotEntity::getOrderSn, orderSn)
                     .set(SeckillStockSnapshotEntity::getMessage, resultMessage)
@@ -489,13 +492,18 @@ public class SeckillRepository {
                 return null;
             }
             StockVersion stockVersion = null;
-            if (releasableStatus.equals(snapshot.getStatus())) {
+            String currentStatus = snapshot.getStatus();
+            boolean releasable = releasableStatus.equals(currentStatus)
+                    || ("DEDUCTED".equals(releasableStatus)
+                    && "REGISTERED".equals(currentStatus)
+                    && hasDeductChangeLog(requestId));
+            if (releasable) {
                 LocalDateTime now = LocalDateTime.now();
                 String resultMessage = messageOrDefault(message, "Stock released");
                 int updated = releaseDeductionSnapshotUpdateTimer.record(() -> snapshotMapper.update(null, Wrappers.<SeckillStockSnapshotEntity>lambdaUpdate()
                         .eq(SeckillStockSnapshotEntity::getRequestId, requestId)
                         .eq(bucketShardKey != null, SeckillStockSnapshotEntity::getBucketShardKey, bucketShardKey)
-                        .eq(SeckillStockSnapshotEntity::getStatus, releasableStatus)
+                        .eq(SeckillStockSnapshotEntity::getStatus, currentStatus)
                         .set(SeckillStockSnapshotEntity::getStatus, "RELEASING")
                         .set(SeckillStockSnapshotEntity::getMessage, resultMessage)
                         .set(SeckillStockSnapshotEntity::getUpdatedAt, now)));
@@ -629,7 +637,7 @@ public class SeckillRepository {
         return bucketService != null && properties.getBucket().isEnabled();
     }
 
-    private boolean hasDeductFact(String requestId) {
+    private boolean hasDeductChangeLog(String requestId) {
         return changeLogMapper != null && changeLogMapper.countByRequestIdAndChangeType(requestId, "DEDUCT") > 0;
     }
 

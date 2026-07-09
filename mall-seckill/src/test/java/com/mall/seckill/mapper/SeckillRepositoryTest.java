@@ -382,6 +382,23 @@ class SeckillRepositoryTest {
     }
 
     @Test
+    void shouldConfirmRegisteredSnapshotWhenDeductChangeLogExists() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillStockSnapshotEntity snapshot = snapshot("r1", "REGISTERED", 1);
+        snapshot.setBucketShardKey(3L);
+        when(snapshotMapper.selectOne(any())).thenReturn(snapshot);
+        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(1L);
+        when(snapshotMapper.update(isNull(), any())).thenReturn(1);
+
+        SeckillRepository.StockSnapshot result = bucketRepository.confirmDeduction("r1", 3L, "S1", "Order created");
+
+        assertThat(result.status()).isEqualTo("CONFIRMED");
+        verify(snapshotMapper).update(isNull(), any());
+        verify(skuMapper, never()).deductStock(anyLong(), anyLong(), any());
+        verify(skuMapper, never()).deductStockAndIncreaseVersionById(anyLong(), any());
+    }
+
+    @Test
     void shouldReleaseDeductionAndReturnStockVersion() {
         SeckillStockSnapshotEntity snapshot = snapshot("r1", "DEDUCTED", 1);
         StockVersion stockVersion = new StockVersion(50, 2L);
@@ -416,6 +433,28 @@ class SeckillRepositoryTest {
         when(bucketService.release(snapshot)).thenReturn(stockVersion);
 
         StockReleaseResult result = bucketRepository.releaseDeduction("r1", "Order failed");
+
+        assertThat(result.snapshot().status()).isEqualTo("RELEASED");
+        assertThat(result.stockVersion()).isEqualTo(stockVersion);
+        verify(bucketService).release(snapshot);
+        verify(skuMapper, never()).releaseStockAndIncreaseVersionById(anyLong(), any());
+        verify(skuMapper, never()).selectStockVersionById(anyLong());
+    }
+
+    @Test
+    void shouldReleaseRegisteredSnapshotWhenDeductChangeLogExists() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillStockSnapshotEntity snapshot = snapshot("r1", "REGISTERED", 1);
+        snapshot.setBucketId(99L);
+        snapshot.setBucketNo(3);
+        snapshot.setBucketShardKey(3L);
+        StockVersion stockVersion = new StockVersion(50, 9L);
+        when(snapshotMapper.selectOne(any())).thenReturn(snapshot);
+        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(1L);
+        when(snapshotMapper.update(isNull(), any())).thenReturn(1);
+        when(bucketService.release(snapshot)).thenReturn(stockVersion);
+
+        StockReleaseResult result = bucketRepository.releaseDeduction("r1", 3L, "Order failed");
 
         assertThat(result.snapshot().status()).isEqualTo("RELEASED");
         assertThat(result.stockVersion()).isEqualTo(stockVersion);
