@@ -37,11 +37,25 @@ mall:
       repair:
         enabled: true
     reservation-guard:
-      enabled: true
+      enabled: false
       processing-probe-after-seconds: 30
       safe-release-after-seconds: 300
       repair-batch-size: 100
       repair-fixed-delay: 60000
+    entry-guard:
+      enabled: true
+      key-prefix: "seckill:entry:"
+      request-ttl-seconds: 300
+      buyer-ttl-buffer-seconds: 600
+    order-outbox:
+      enabled: true
+      fixed-delay: 100
+      batch-size: 500
+    snapshot-repair:
+      enabled: true
+      fixed-delay: 1000
+      registered-timeout-seconds: 30
+      batch-size: 200
     result-retry:
       enabled: true
       delays:

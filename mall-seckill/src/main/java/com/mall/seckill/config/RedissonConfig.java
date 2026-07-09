@@ -14,7 +14,7 @@ import java.time.Duration;
 public class RedissonConfig {
 
     @Bean(destroyMethod = "shutdown")
-    @ConditionalOnExpression("${mall.seckill.lock.enabled:true} || ${mall.seckill.bucket.transfer.enabled:false} || ${mall.seckill.bucket.auto-transfer.enabled:false}")
+    @ConditionalOnExpression("${mall.seckill.lock.enabled:true} || ${mall.seckill.entry-guard.enabled:false} || ${mall.seckill.bucket.transfer.enabled:false} || ${mall.seckill.bucket.auto-transfer.enabled:false}")
     public RedissonClient redissonClient(RedisProperties properties) {
         Config config = new Config();
         String host = properties.getHost() == null ? "localhost" : properties.getHost();

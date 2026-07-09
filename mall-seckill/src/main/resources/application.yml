@@ -58,6 +58,20 @@ mall:
       safe-release-after-seconds: 300
       repair-batch-size: 100
       repair-fixed-delay: 60000
+    entry-guard:
+      enabled: false
+      key-prefix: "seckill:entry:"
+      request-ttl-seconds: 300
+      buyer-ttl-buffer-seconds: 600
+    order-outbox:
+      enabled: false
+      fixed-delay: 1000
+      batch-size: 500
+    snapshot-repair:
+      enabled: false
+      fixed-delay: 1000
+      registered-timeout-seconds: 30
+      batch-size: 200
     result-retry:
       enabled: false
       delays:

@@ -12,6 +12,9 @@ public class SeckillProperties {
     private Lock lock = new Lock();
     private StockCache stockCache = new StockCache();
     private ReservationGuard reservationGuard = new ReservationGuard();
+    private EntryGuard entryGuard = new EntryGuard();
+    private OrderOutbox orderOutbox = new OrderOutbox();
+    private SnapshotRepair snapshotRepair = new SnapshotRepair();
     private ResultRetry resultRetry = new ResultRetry();
     private LoadTest loadTest = new LoadTest();
     private Hotspot hotspot = new Hotspot();
@@ -55,6 +58,30 @@ public class SeckillProperties {
 
     public void setReservationGuard(ReservationGuard reservationGuard) {
         this.reservationGuard = reservationGuard;
+    }
+
+    public EntryGuard getEntryGuard() {
+        return entryGuard;
+    }
+
+    public void setEntryGuard(EntryGuard entryGuard) {
+        this.entryGuard = entryGuard == null ? new EntryGuard() : entryGuard;
+    }
+
+    public OrderOutbox getOrderOutbox() {
+        return orderOutbox;
+    }
+
+    public void setOrderOutbox(OrderOutbox orderOutbox) {
+        this.orderOutbox = orderOutbox == null ? new OrderOutbox() : orderOutbox;
+    }
+
+    public SnapshotRepair getSnapshotRepair() {
+        return snapshotRepair;
+    }
+
+    public void setSnapshotRepair(SnapshotRepair snapshotRepair) {
+        this.snapshotRepair = snapshotRepair == null ? new SnapshotRepair() : snapshotRepair;
     }
 
     public ResultRetry getResultRetry() {
@@ -237,6 +264,117 @@ public class SeckillProperties {
 
         public void setRepairFixedDelay(long repairFixedDelay) {
             this.repairFixedDelay = repairFixedDelay;
+        }
+    }
+
+    public static class EntryGuard {
+
+        private boolean enabled = false;
+        private String keyPrefix = "seckill:entry:";
+        private long requestTtlSeconds = 300;
+        private long buyerTtlBufferSeconds = 600;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getKeyPrefix() {
+            return keyPrefix;
+        }
+
+        public void setKeyPrefix(String keyPrefix) {
+            this.keyPrefix = keyPrefix;
+        }
+
+        public long getRequestTtlSeconds() {
+            return requestTtlSeconds;
+        }
+
+        public void setRequestTtlSeconds(long requestTtlSeconds) {
+            this.requestTtlSeconds = requestTtlSeconds;
+        }
+
+        public long getBuyerTtlBufferSeconds() {
+            return buyerTtlBufferSeconds;
+        }
+
+        public void setBuyerTtlBufferSeconds(long buyerTtlBufferSeconds) {
+            this.buyerTtlBufferSeconds = buyerTtlBufferSeconds;
+        }
+    }
+
+    public static class OrderOutbox {
+
+        private boolean enabled = false;
+        private long fixedDelay = 1000;
+        private int batchSize = 500;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getFixedDelay() {
+            return fixedDelay;
+        }
+
+        public void setFixedDelay(long fixedDelay) {
+            this.fixedDelay = fixedDelay;
+        }
+
+        public int getBatchSize() {
+            return batchSize;
+        }
+
+        public void setBatchSize(int batchSize) {
+            this.batchSize = batchSize;
+        }
+    }
+
+    public static class SnapshotRepair {
+
+        private boolean enabled = false;
+        private long fixedDelay = 1000;
+        private long registeredTimeoutSeconds = 30;
+        private int batchSize = 200;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getFixedDelay() {
+            return fixedDelay;
+        }
+
+        public void setFixedDelay(long fixedDelay) {
+            this.fixedDelay = fixedDelay;
+        }
+
+        public long getRegisteredTimeoutSeconds() {
+            return registeredTimeoutSeconds;
+        }
+
+        public void setRegisteredTimeoutSeconds(long registeredTimeoutSeconds) {
+            this.registeredTimeoutSeconds = registeredTimeoutSeconds;
+        }
+
+        public int getBatchSize() {
+            return batchSize;
+        }
+
+        public void setBatchSize(int batchSize) {
+            this.batchSize = batchSize;
         }
     }
 
