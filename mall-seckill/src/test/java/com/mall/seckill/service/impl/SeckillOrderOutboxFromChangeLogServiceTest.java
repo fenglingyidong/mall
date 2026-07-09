@@ -16,6 +16,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -27,6 +32,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -57,6 +63,7 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
                 messageRepository,
                 messagePublisher,
                 new ObjectMapper(),
+                new TransactionTemplate(new TestTransactionManager()),
                 properties);
     }
 
@@ -161,6 +168,118 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
     }
 
     @Test
+    void shouldMarkOutboxFailedWhenOutboxedUpdateReturnsZeroAfterEnqueue() {
+        SeckillStockChangeLogEntity changeLog = deductChangeLog();
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
+                .thenReturn(List.of(changeLog));
+        when(changeLogMapper.updateStatusByShard(
+                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+                .thenReturn(1);
+        when(messageRepository.existsByBusinessKeyAndRoutingKey(
+                "req-1", MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY, 7L))
+                .thenReturn(false);
+        when(seckillRepository.findStockSnapshot("req-1", 7L))
+                .thenReturn(new SeckillRepository.StockSnapshot("req-1", 1L, 1001L, 2001L, 2, "DEDUCTED"));
+        when(seckillRepository.requireSku(1L, 1001L))
+                .thenReturn(new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50));
+        when(changeLogMapper.updateStatusByShard(
+                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
+                .thenReturn(0);
+
+        assertThatCode(() -> assertThat(service.drainOnce()).isZero())
+                .doesNotThrowAnyException();
+
+        verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-1"), anyString(), eq(7L));
+        verify(changeLogMapper).updateStatusByShard(
+                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
+    }
+
+    @Test
+    void shouldContinueBatchAfterFirstOutboxedUpdateThrows() {
+        SeckillStockChangeLogEntity first = deductChangeLog(11L, "req-1", 7L);
+        SeckillStockChangeLogEntity second = deductChangeLog(12L, "req-2", 8L);
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
+                .thenReturn(List.of(first, second));
+        when(changeLogMapper.updateStatusByShard(
+                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+                .thenReturn(1);
+        when(changeLogMapper.updateStatusByShard(
+                12L, 8L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+                .thenReturn(1);
+        when(messageRepository.existsByBusinessKeyAndRoutingKey(
+                "req-1", MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY, 7L))
+                .thenReturn(false);
+        when(messageRepository.existsByBusinessKeyAndRoutingKey(
+                "req-2", MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY, 8L))
+                .thenReturn(false);
+        when(seckillRepository.findStockSnapshot("req-1", 7L))
+                .thenReturn(new SeckillRepository.StockSnapshot("req-1", 1L, 1001L, 2001L, 2, "DEDUCTED"));
+        when(seckillRepository.findStockSnapshot("req-2", 8L))
+                .thenReturn(new SeckillRepository.StockSnapshot("req-2", 1L, 1001L, 2002L, 1, "DEDUCTED"));
+        when(seckillRepository.requireSku(1L, 1001L))
+                .thenReturn(new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50));
+        when(changeLogMapper.updateStatusByShard(
+                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
+                .thenThrow(new IllegalStateException("outboxed update failed"));
+        when(changeLogMapper.updateStatusByShard(
+                12L, 8L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
+                .thenReturn(1);
+
+        int drained = service.drainOnce();
+
+        assertThat(drained).isEqualTo(1);
+        verify(changeLogMapper).updateStatusByShard(
+                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
+        verify(changeLogMapper).updateStatusByShard(
+                12L, 8L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+        verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-1"), anyString(), eq(7L));
+        verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-2"), anyString(), eq(8L));
+    }
+
+    @Test
+    void shouldSkipWhenClaimFailsWithoutEnqueueOrMarkFailed() {
+        SeckillStockChangeLogEntity changeLog = deductChangeLog();
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
+                .thenReturn(List.of(changeLog));
+        when(changeLogMapper.updateStatusByShard(
+                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+                .thenReturn(0);
+
+        int drained = service.drainOnce();
+
+        assertThat(drained).isZero();
+        verifyNoInteractions(seckillRepository, messageRepository, messagePublisher);
+        verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500);
+        verify(changeLogMapper).updateStatusByShard(
+                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING);
+        verifyNoMoreInteractions(changeLogMapper);
+    }
+
+    @Test
+    void shouldClampBatchSizeToOneWhenConfiguredBelowMinimum() {
+        properties.getOrderOutbox().setBatchSize(0);
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1))
+                .thenReturn(List.of());
+
+        int drained = service.drainOnce();
+
+        assertThat(drained).isZero();
+        verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1);
+    }
+
+    @Test
+    void shouldClampBatchSizeToOneThousandWhenConfiguredAboveMaximum() {
+        properties.getOrderOutbox().setBatchSize(1001);
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1000))
+                .thenReturn(List.of());
+
+        int drained = service.drainOnce();
+
+        assertThat(drained).isZero();
+        verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1000);
+    }
+
+    @Test
     void shouldReturnZeroAndSkipQueryWhenDisabled() {
         properties.getOrderOutbox().setEnabled(false);
 
@@ -171,15 +290,35 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
     }
 
     private SeckillStockChangeLogEntity deductChangeLog() {
+        return deductChangeLog(11L, "req-1", 7L);
+    }
+
+    private SeckillStockChangeLogEntity deductChangeLog(Long id, String requestId, Long bucketShardKey) {
         SeckillStockChangeLogEntity changeLog = new SeckillStockChangeLogEntity();
-        changeLog.setId(11L);
-        changeLog.setRequestId("req-1");
+        changeLog.setId(id);
+        changeLog.setRequestId(requestId);
         changeLog.setActivityId(1L);
         changeLog.setSkuId(1001L);
-        changeLog.setBucketShardKey(7L);
+        changeLog.setBucketShardKey(bucketShardKey);
         changeLog.setChangeType("DEDUCT");
         changeLog.setQuantityDelta(-2);
         changeLog.setStatus(SeckillStockChangeLogStatus.NEW);
         return changeLog;
+    }
+
+    private static class TestTransactionManager implements PlatformTransactionManager {
+
+        @Override
+        public TransactionStatus getTransaction(TransactionDefinition definition) {
+            return new SimpleTransactionStatus();
+        }
+
+        @Override
+        public void commit(TransactionStatus status) {
+        }
+
+        @Override
+        public void rollback(TransactionStatus status) {
+        }
     }
 }

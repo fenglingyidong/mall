@@ -14,6 +14,7 @@ import com.mall.seckill.pojo.entity.SeckillStockChangeLogEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.List;
 
@@ -30,6 +31,7 @@ public class SeckillOrderOutboxFromChangeLogService {
     private final ReliableMessageRepository messageRepository;
     private final ReliableMessagePublisher messagePublisher;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate transactionTemplate;
     private final SeckillProperties properties;
 
     public SeckillOrderOutboxFromChangeLogService(SeckillStockChangeLogMapper changeLogMapper,
@@ -37,12 +39,14 @@ public class SeckillOrderOutboxFromChangeLogService {
                                                   ReliableMessageRepository messageRepository,
                                                   ReliableMessagePublisher messagePublisher,
                                                   ObjectMapper objectMapper,
+                                                  TransactionTemplate transactionTemplate,
                                                   SeckillProperties properties) {
         this.changeLogMapper = changeLogMapper;
         this.seckillRepository = seckillRepository;
         this.messageRepository = messageRepository;
         this.messagePublisher = messagePublisher;
         this.objectMapper = objectMapper;
+        this.transactionTemplate = transactionTemplate;
         this.properties = properties;
     }
 
@@ -70,10 +74,7 @@ public class SeckillOrderOutboxFromChangeLogService {
             return false;
         }
         try {
-            if (!CHANGE_TYPE_DEDUCT.equals(changeLog.getChangeType())) {
-                return updateStatus(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
-            }
-            return drainDeduct(changeLog);
+            return Boolean.TRUE.equals(transactionTemplate.execute(status -> processClaimed(changeLog)));
         } catch (RuntimeException exception) {
             log.warn("Failed to build seckill order outbox from change log, changeLogId={}, requestId={}",
                     changeLog.getId(), changeLog.getRequestId(), exception);
@@ -82,12 +83,19 @@ public class SeckillOrderOutboxFromChangeLogService {
         }
     }
 
-    private boolean drainDeduct(SeckillStockChangeLogEntity changeLog) {
+    private boolean processClaimed(SeckillStockChangeLogEntity changeLog) {
+        if (!CHANGE_TYPE_DEDUCT.equals(changeLog.getChangeType())) {
+            updateStatusOrThrow(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+            return true;
+        }
+        return processDeduct(changeLog);
+    }
+
+    private boolean processDeduct(SeckillStockChangeLogEntity changeLog) {
         String requestId = changeLog.getRequestId();
         Long bucketShardKey = changeLog.getBucketShardKey();
         if (requestId == null || requestId.isBlank()) {
-            markFailed(changeLog);
-            return false;
+            throw new IllegalStateException("Seckill change log requestId is blank");
         }
 
         boolean outboxExists = messageRepository.existsByBusinessKeyAndRoutingKey(
@@ -95,13 +103,13 @@ public class SeckillOrderOutboxFromChangeLogService {
                 MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY,
                 bucketShardKey);
         if (outboxExists) {
-            return updateStatus(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+            updateStatusOrThrow(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+            return true;
         }
 
         SeckillRepository.StockSnapshot snapshot = seckillRepository.findStockSnapshot(requestId, bucketShardKey);
         if (snapshot == null) {
-            markFailed(changeLog);
-            return false;
+            throw new IllegalStateException("Seckill stock snapshot not found");
         }
 
         SeckillSku sku = seckillRepository.requireSku(changeLog.getActivityId(), changeLog.getSkuId());
@@ -115,7 +123,8 @@ public class SeckillOrderOutboxFromChangeLogService {
                 snapshot.quantity(),
                 bucketShardKey);
         messagePublisher.enqueueSeckillOrderCreate(requestId, JsonUtils.toJson(objectMapper, orderRequest), bucketShardKey);
-        return updateStatus(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+        updateStatusOrThrow(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+        return true;
     }
 
     private boolean updateStatus(SeckillStockChangeLogEntity changeLog, String expectedStatus, String nextStatus) {
@@ -130,6 +139,13 @@ public class SeckillOrderOutboxFromChangeLogService {
             updated = changeLogMapper.updateStatus(changeLog.getId(), expectedStatus, nextStatus);
         }
         return updated > 0;
+    }
+
+    private void updateStatusOrThrow(SeckillStockChangeLogEntity changeLog, String expectedStatus, String nextStatus) {
+        if (!updateStatus(changeLog, expectedStatus, nextStatus)) {
+            throw new IllegalStateException("Seckill change log status update failed, id="
+                    + changeLog.getId() + ", expectedStatus=" + expectedStatus + ", nextStatus=" + nextStatus);
+        }
     }
 
     private void markFailed(SeckillStockChangeLogEntity changeLog) {
