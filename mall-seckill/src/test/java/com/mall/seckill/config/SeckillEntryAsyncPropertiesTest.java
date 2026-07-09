@@ -21,6 +21,7 @@ class SeckillEntryAsyncPropertiesTest {
         assertThat(properties.getOrderOutbox().getBatchSize()).isEqualTo(500);
 
         assertThat(properties.getSnapshotRepair().isEnabled()).isFalse();
+        assertThat(properties.getSnapshotRepair().getFixedDelay()).isEqualTo(1000);
         assertThat(properties.getSnapshotRepair().getRegisteredTimeoutSeconds()).isEqualTo(30);
         assertThat(properties.getSnapshotRepair().getBatchSize()).isEqualTo(200);
     }
