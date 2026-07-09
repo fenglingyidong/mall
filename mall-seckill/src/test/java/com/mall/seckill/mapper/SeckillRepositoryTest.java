@@ -25,7 +25,13 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
 
 import java.util.List;
 import java.util.Map;
@@ -301,16 +307,20 @@ class SeckillRepositoryTest {
     }
 
     @Test
-    void shouldReturnDuplicateWhenDeductFactDuplicateRacesAfterBucketDeduct() {
+    void shouldRollbackTransactionWhenDeductFactDuplicateRacesAfterBucketDeduct() {
         SeckillRepository bucketRepository = bucketRepository();
+        RecordingTransactionManager transactionManager = new RecordingTransactionManager();
+        SeckillRepository transactionalRepository = transactionalProxy(bucketRepository, transactionManager);
         SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
         when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(0L);
         when(bucketService.deductSelected(selectedBucket, "r1", 1L, 1001L, 1))
                 .thenThrow(new DuplicateKeyException("duplicate deduct fact"));
 
-        StockDeductionResult result = bucketRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
+        StockDeductionResult result = transactionalRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
 
         assertThat(result.code()).isEqualTo(2);
+        assertThat(transactionManager.rolledBack).isTrue();
+        assertThat(transactionManager.committed).isFalse();
         verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
         verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
     }
@@ -508,5 +518,37 @@ class SeckillRepositoryTest {
                 bucketService,
                 properties,
                 new SimpleMeterRegistry());
+    }
+
+    private SeckillRepository transactionalProxy(SeckillRepository target, RecordingTransactionManager transactionManager) {
+        ProxyFactory proxyFactory = new ProxyFactory(target);
+        proxyFactory.setProxyTargetClass(true);
+        proxyFactory.addAdvice(new TransactionInterceptor(transactionManager, new AnnotationTransactionAttributeSource()));
+        return (SeckillRepository) proxyFactory.getProxy();
+    }
+
+    private static final class RecordingTransactionManager extends AbstractPlatformTransactionManager {
+
+        private boolean committed;
+        private boolean rolledBack;
+
+        @Override
+        protected Object doGetTransaction() {
+            return new Object();
+        }
+
+        @Override
+        protected void doBegin(Object transaction, TransactionDefinition definition) {
+        }
+
+        @Override
+        protected void doCommit(DefaultTransactionStatus status) {
+            committed = true;
+        }
+
+        @Override
+        protected void doRollback(DefaultTransactionStatus status) {
+            rolledBack = true;
+        }
     }
 }
