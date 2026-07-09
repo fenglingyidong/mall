@@ -1,13 +1,10 @@
 package com.mall.seckill.service.impl;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mall.common.context.UserContext;
 import com.mall.common.context.UserInfo;
 import com.mall.common.exception.BusinessException;
-import com.mall.message.ReliableMessagePublisher;
 import com.mall.seckill.cache.SeckillStockCache;
 import com.mall.seckill.config.SeckillProperties;
-import com.mall.seckill.mapper.ReservationGuardRepository;
 import com.mall.seckill.mapper.SeckillRepository;
 import com.mall.seckill.mapper.SeckillStockNotEnoughException;
 import com.mall.seckill.pojo.entity.SeckillActivity;
@@ -20,12 +17,10 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.transaction.PlatformTransactionManager;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -39,7 +34,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -56,12 +50,6 @@ class SeckillServiceImplTest {
 
     @Mock
     private SeckillHotspotGuard hotspotGuard;
-
-    @Mock
-    private ReliableMessagePublisher messagePublisher;
-
-    @Mock
-    private ReservationGuardRepository guardRepository;
 
     @Mock
     private SeckillEntryGuard entryGuard;
@@ -85,7 +73,6 @@ class SeckillServiceImplTest {
                 .isInstanceOf(BusinessException.class)
                 .hasMessage("Seckill async entry guard is not enabled");
 
-        verifyNoInteractions(messagePublisher, guardRepository);
         verify(repository, never()).selectBucket(anyLong(), anyLong());
     }
 
@@ -116,7 +103,6 @@ class SeckillServiceImplTest {
         verify(repository).registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket);
         verify(repository).recordBucketDeductionFact("client-r1", 1L, 1001L, selectedBucket, 1);
         verify(repository, never()).saveResult(any());
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -149,7 +135,6 @@ class SeckillServiceImplTest {
         verify(repository, times(2)).registerBucketSnapshot(anyString(), eq(10L), eq(1L), eq(1001L), anyLong(), eq(1), eq(selectedBucket));
         verify(repository, times(2)).recordBucketDeductionFact(anyString(), eq(1L), eq(1001L), eq(selectedBucket), eq(1));
         verify(stockCache, never()).refresh(anyLong(), anyLong(), any());
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -176,7 +161,6 @@ class SeckillServiceImplTest {
         assertThat(response.requestId()).isEqualTo("client-r1");
         verify(entryGuard).acquireRequest("client-r1");
         verify(repository).registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket);
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -196,7 +180,6 @@ class SeckillServiceImplTest {
         assertThat(response.message()).isEqualTo("Processing");
         verify(entryGuard, never()).acquireBuyer(anyLong(), anyLong(), anyLong(), anyString(), any());
         verify(repository, never()).selectBucket(anyLong(), anyLong());
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -217,7 +200,6 @@ class SeckillServiceImplTest {
         assertThat(response.status()).isEqualTo("PROCESSING");
         verify(repository, never()).selectBucket(anyLong(), anyLong());
         verify(repository, never()).registerBucketSnapshot(anyString(), anyLong(), anyLong(), anyLong(), anyLong(), eq(1), any());
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -238,7 +220,30 @@ class SeckillServiceImplTest {
         assertThat(response.message()).isEqualTo("Duplicate purchase");
         verify(repository, never()).selectBucket(anyLong(), anyLong());
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Duplicate purchase"));
-        verifyNoInteractions(messagePublisher, guardRepository);
+    }
+
+    @Test
+    void asyncEntrySubmitShouldReleaseBuyerAndSkipBucketWorkWhenStockCacheSoldOut() {
+        SeckillServiceImpl service = newAsyncEntryService();
+        SeckillActivity activity = activeActivity();
+        stubMetadata(activity, sku());
+        stubAsyncEntryEnabled();
+        when(entryGuard.acquireRequest("client-r1"))
+                .thenReturn(new SeckillEntryGuard.RequestDecision(SeckillEntryGuard.RequestOutcome.ACQUIRED));
+        when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
+                .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
+        when(stockCache.isSoldOut(1L, 1001L)).thenReturn(true);
+
+        UserContext.set(new UserInfo(101L, "u101"));
+        SeckillSubmitResponse response = service.submit(1L, 1001L, "client-r1");
+
+        assertThat(response.status()).isEqualTo("FAILED");
+        assertThat(response.message()).isEqualTo("Stock not enough");
+        verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
+        verify(repository, never()).selectBucket(anyLong(), anyLong());
+        verify(repository, never()).registerBucketSnapshot(anyString(), anyLong(), anyLong(), anyLong(), anyLong(), eq(1), any());
+        verify(repository, never()).recordBucketDeductionFact(anyString(), anyLong(), anyLong(), any(), eq(1));
+        verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Stock not enough"));
     }
 
     @Test
@@ -261,7 +266,6 @@ class SeckillServiceImplTest {
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
         verify(repository, never()).registerBucketSnapshot(anyString(), anyLong(), anyLong(), anyLong(), anyLong(), eq(1), any());
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Stock not enough"));
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -289,7 +293,6 @@ class SeckillServiceImplTest {
         assertThat(response.status()).isEqualTo("PROCESSING");
         verify(repository, never()).recordBucketDeductionFact(anyString(), anyLong(), anyLong(), any(), eq(1));
         verify(entryGuard, never()).releaseBuyer(anyLong(), anyLong(), anyLong(), anyString());
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -317,7 +320,6 @@ class SeckillServiceImplTest {
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
         verify(repository, never()).recordBucketDeductionFact(anyString(), anyLong(), anyLong(), any(), eq(1));
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Duplicate purchase"));
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -345,7 +347,6 @@ class SeckillServiceImplTest {
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
         verify(repository).markRegisteredSnapshotFailed("client-r1", "Stock not enough");
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Stock not enough"));
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -373,7 +374,6 @@ class SeckillServiceImplTest {
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
         verify(repository).markRegisteredSnapshotFailed("client-r1", "Duplicate purchase");
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Duplicate purchase"));
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -400,7 +400,6 @@ class SeckillServiceImplTest {
         assertThat(response.status()).isEqualTo("PROCESSING");
         verify(sentinelGuard).checkSubmit(true);
         verify(hotspotGuard).acquire(1L, 1001L);
-        verifyNoInteractions(messagePublisher, guardRepository);
     }
 
     @Test
@@ -452,7 +451,7 @@ class SeckillServiceImplTest {
         SeckillProperties properties = new SeckillProperties();
         properties.getLock().setEnabled(false);
         properties.setMetadataCacheTtlMillis(metadataCacheTtlMillis);
-        return newService(properties, emptyReservationGuardProvider(), null);
+        return newService(properties, null);
     }
 
     private SeckillServiceImpl newAsyncEntryService() {
@@ -464,74 +463,21 @@ class SeckillServiceImplTest {
         properties.getLock().setEnabled(false);
         properties.getEntryGuard().setEnabled(true);
         properties.setMetadataCacheTtlMillis(metadataCacheTtlMillis);
-        return newService(properties, guardRepositoryProvider(), entryGuard);
+        return newService(properties, entryGuard);
     }
 
     private SeckillServiceImpl newService(SeckillProperties properties,
-                                          ObjectProvider<ReservationGuardRepository> guardRepositoryProvider,
                                           SeckillEntryGuard entryGuard) {
         return new SeckillServiceImpl(
                 repository,
                 stockCache,
                 sentinelGuard,
                 hotspotGuard,
-                messagePublisher,
-                guardRepositoryProvider,
-                new ObjectMapper(),
                 emptyRedissonProvider(),
                 properties,
                 new SimpleMeterRegistry(),
-                emptyTransactionManagerProvider(),
                 entryGuard
         );
-    }
-
-    private ObjectProvider<ReservationGuardRepository> guardRepositoryProvider() {
-        return new ObjectProvider<>() {
-            @Override
-            public ReservationGuardRepository getObject(Object... args) {
-                return guardRepository;
-            }
-
-            @Override
-            public ReservationGuardRepository getIfAvailable() {
-                return guardRepository;
-            }
-
-            @Override
-            public ReservationGuardRepository getIfUnique() {
-                return guardRepository;
-            }
-
-            @Override
-            public ReservationGuardRepository getObject() {
-                return guardRepository;
-            }
-        };
-    }
-
-    private ObjectProvider<ReservationGuardRepository> emptyReservationGuardProvider() {
-        return new ObjectProvider<>() {
-            @Override
-            public ReservationGuardRepository getObject(Object... args) {
-                return null;
-            }
-
-            @Override
-            public ReservationGuardRepository getIfAvailable() {
-                return null;
-            }
-
-            @Override
-            public ReservationGuardRepository getIfUnique() {
-                return null;
-            }
-
-            @Override
-            public ReservationGuardRepository getObject() {
-                return null;
-            }
-        };
     }
 
     private ObjectProvider<RedissonClient> emptyRedissonProvider() {
@@ -558,27 +504,4 @@ class SeckillServiceImplTest {
         };
     }
 
-    private ObjectProvider<PlatformTransactionManager> emptyTransactionManagerProvider() {
-        return new ObjectProvider<>() {
-            @Override
-            public PlatformTransactionManager getObject(Object... args) {
-                return null;
-            }
-
-            @Override
-            public PlatformTransactionManager getIfAvailable() {
-                return null;
-            }
-
-            @Override
-            public PlatformTransactionManager getIfUnique() {
-                return null;
-            }
-
-            @Override
-            public PlatformTransactionManager getObject() {
-                return null;
-            }
-        };
-    }
 }

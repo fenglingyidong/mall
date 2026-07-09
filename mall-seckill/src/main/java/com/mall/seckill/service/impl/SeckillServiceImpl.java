@@ -1,12 +1,9 @@
 package com.mall.seckill.service.impl;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mall.common.context.UserContext;
 import com.mall.common.exception.BusinessException;
-import com.mall.message.ReliableMessagePublisher;
 import com.mall.seckill.cache.SeckillStockCache;
 import com.mall.seckill.config.SeckillProperties;
-import com.mall.seckill.mapper.ReservationGuardRepository;
 import com.mall.seckill.mapper.SeckillRepository;
 import com.mall.seckill.mapper.SeckillStockNotEnoughException;
 import com.mall.seckill.pojo.entity.SeckillActivity;
@@ -23,7 +20,6 @@ import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.PlatformTransactionManager;
 
 import java.time.Instant;
 import java.util.List;
@@ -53,6 +49,7 @@ public class SeckillServiceImpl implements SeckillService {
     private final Timer submitSentinelTimer;
     private final Timer submitMetadataTimer;
     private final Timer submitLockTimer;
+    private final Timer submitStockCacheSoldOutTimer;
     private final ConcurrentMap<Long, CacheEntry<SeckillActivity>> activityCache = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, CacheEntry<SeckillSku>> skuCache = new ConcurrentHashMap<>();
 
@@ -60,24 +57,16 @@ public class SeckillServiceImpl implements SeckillService {
                               SeckillStockCache stockCache,
                               SentinelSeckillGuard sentinelGuard,
                               SeckillHotspotGuard hotspotGuard,
-                              ReliableMessagePublisher messagePublisher,
-                              ObjectProvider<ReservationGuardRepository> guardRepository,
-                              ObjectMapper objectMapper,
                               ObjectProvider<RedissonClient> redissonClient,
                               SeckillProperties properties,
-                              MeterRegistry meterRegistry,
-                              ObjectProvider<PlatformTransactionManager> transactionManager) {
+                              MeterRegistry meterRegistry) {
         this(repository,
                 stockCache,
                 sentinelGuard,
                 hotspotGuard,
-                messagePublisher,
-                guardRepository,
-                objectMapper,
                 redissonClient,
                 properties,
                 meterRegistry,
-                transactionManager,
                 null);
     }
 
@@ -86,13 +75,9 @@ public class SeckillServiceImpl implements SeckillService {
                               SeckillStockCache stockCache,
                               SentinelSeckillGuard sentinelGuard,
                               SeckillHotspotGuard hotspotGuard,
-                              ReliableMessagePublisher messagePublisher,
-                              ObjectProvider<ReservationGuardRepository> guardRepository,
-                              ObjectMapper objectMapper,
                               ObjectProvider<RedissonClient> redissonClient,
                               SeckillProperties properties,
                               MeterRegistry meterRegistry,
-                              ObjectProvider<PlatformTransactionManager> transactionManager,
                               SeckillEntryGuard entryGuard) {
         this.repository = repository;
         this.stockCache = stockCache;
@@ -106,6 +91,7 @@ public class SeckillServiceImpl implements SeckillService {
         this.submitSentinelTimer = timer("seckill.submit.sentinel", "Official seckill submit Sentinel guard latency");
         this.submitMetadataTimer = timer("seckill.submit.metadata", "Official seckill submit metadata load latency");
         this.submitLockTimer = timer("seckill.submit.lock", "Official seckill submit duplicate lock latency");
+        this.submitStockCacheSoldOutTimer = timer("seckill.submit.stock-cache.sold-out", "Official seckill submit stock-cache sold-out check latency");
     }
 
     @Override
@@ -230,6 +216,10 @@ public class SeckillServiceImpl implements SeckillService {
         }
         if (buyerDecision.outcome() == SeckillEntryGuard.BuyerOutcome.DUPLICATE_BUYER) {
             return failedSubmit(requestId, DUPLICATE_PURCHASE);
+        }
+        if (submitStockCacheSoldOutTimer.record(() -> stockCache.isSoldOut(activityId, skuId))) {
+            entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
+            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
         }
 
         SeckillBucketService.SelectedBucket selectedBucket;
