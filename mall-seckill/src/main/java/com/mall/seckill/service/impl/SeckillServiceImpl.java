@@ -24,6 +24,7 @@ import io.micrometer.core.instrument.Timer;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.TransientDataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -55,6 +56,7 @@ public class SeckillServiceImpl implements SeckillService {
     private final SeckillHotspotGuard hotspotGuard;
     private final ReliableMessagePublisher messagePublisher;
     private final ReservationGuardRepository guardRepository;
+    private final SeckillEntryGuard entryGuard;
     private final ObjectMapper objectMapper;
     private final RedissonClient redissonClient;
     private final SeckillProperties properties;
@@ -81,12 +83,40 @@ public class SeckillServiceImpl implements SeckillService {
                               SeckillProperties properties,
                               MeterRegistry meterRegistry,
                               ObjectProvider<PlatformTransactionManager> transactionManager) {
+        this(repository,
+                stockCache,
+                sentinelGuard,
+                hotspotGuard,
+                messagePublisher,
+                guardRepository,
+                objectMapper,
+                redissonClient,
+                properties,
+                meterRegistry,
+                transactionManager,
+                null);
+    }
+
+    @Autowired
+    public SeckillServiceImpl(SeckillRepository repository,
+                              SeckillStockCache stockCache,
+                              SentinelSeckillGuard sentinelGuard,
+                              SeckillHotspotGuard hotspotGuard,
+                              ReliableMessagePublisher messagePublisher,
+                              ObjectProvider<ReservationGuardRepository> guardRepository,
+                              ObjectMapper objectMapper,
+                              ObjectProvider<RedissonClient> redissonClient,
+                              SeckillProperties properties,
+                              MeterRegistry meterRegistry,
+                              ObjectProvider<PlatformTransactionManager> transactionManager,
+                              SeckillEntryGuard entryGuard) {
         this.repository = repository;
         this.stockCache = stockCache;
         this.sentinelGuard = sentinelGuard;
         this.hotspotGuard = hotspotGuard;
         this.messagePublisher = messagePublisher;
         this.guardRepository = guardRepository.getIfAvailable();
+        this.entryGuard = entryGuard;
         this.objectMapper = objectMapper;
         this.redissonClient = redissonClient.getIfAvailable();
         this.properties = properties;
@@ -125,7 +155,13 @@ public class SeckillServiceImpl implements SeckillService {
                 throw new BusinessException(400, "Seckill activity is not active");
             }
             if (redissonClient == null || !properties.getLock().isEnabled()) {
-                return doSubmitWithHotspotPermit(activityId, skuId, userId, metadata.sku(), normalizedRequestId);
+                return doSubmitWithHotspotPermit(
+                        activityId,
+                        skuId,
+                        userId,
+                        metadata.sku(),
+                        metadata.activity().endAt(),
+                        normalizedRequestId);
             }
             RLock lock = redissonClient.getLock(lockKey(activityId, skuId, userId));
             boolean locked;
@@ -139,7 +175,13 @@ public class SeckillServiceImpl implements SeckillService {
                 throw new BusinessException(429, "Duplicate seckill submit");
             }
             try {
-                return doSubmitWithHotspotPermit(activityId, skuId, userId, metadata.sku(), normalizedRequestId);
+                return doSubmitWithHotspotPermit(
+                        activityId,
+                        skuId,
+                        userId,
+                        metadata.sku(),
+                        metadata.activity().endAt(),
+                        normalizedRequestId);
             } finally {
                 unlockIfHeldByCurrentThread(lock);
             }
@@ -182,9 +224,17 @@ public class SeckillServiceImpl implements SeckillService {
         }
     }
 
-    private SeckillSubmitResponse doSubmit(Long activityId, Long skuId, Long userId, SeckillSku sku, String requestId) {
+    private SeckillSubmitResponse doSubmit(Long activityId,
+                                           Long skuId,
+                                           Long userId,
+                                           SeckillSku sku,
+                                           Instant activityEndAt,
+                                           String requestId) {
         if (submitStockCacheSoldOutTimer.record(() -> stockCache.isSoldOut(activityId, skuId))) {
             return failedSubmit(requestId, STOCK_NOT_ENOUGH);
+        }
+        if (asyncEntryGuardEnabled()) {
+            return doSubmitWithAsyncEntry(requestId, activityId, skuId, userId, sku, activityEndAt);
         }
         if (reservationGuardEnabled()) {
             return doSubmitWithReservationGuard(requestId, activityId, skuId, userId, sku);
@@ -211,6 +261,76 @@ public class SeckillServiceImpl implements SeckillService {
             submitStockCacheRefreshTimer.record(() -> stockCache.refresh(activityId, skuId, deductionResult.stockVersion()));
         }
         return new SeckillSubmitResponse(requestId, "ACCEPTED", "Accepted");
+    }
+
+    private SeckillSubmitResponse doSubmitWithAsyncEntry(String requestId,
+                                                         Long activityId,
+                                                         Long skuId,
+                                                         Long userId,
+                                                         SeckillSku sku,
+                                                         Instant activityEndAt) {
+        SeckillEntryGuard.RequestDecision requestDecision = entryGuard.acquireRequest(requestId);
+        if (requestDecision.outcome() == SeckillEntryGuard.RequestOutcome.DUPLICATE) {
+            return responseFromExistingResultOrProcessing(requestId);
+        }
+
+        SeckillEntryGuard.BuyerDecision buyerDecision =
+                entryGuard.acquireBuyer(activityId, skuId, userId, requestId, activityEndAt);
+        if (buyerDecision.outcome() == SeckillEntryGuard.BuyerOutcome.SAME_REQUEST) {
+            return responseFromExistingResultOrProcessing(requestId);
+        }
+        if (buyerDecision.outcome() == SeckillEntryGuard.BuyerOutcome.DUPLICATE_BUYER) {
+            return duplicatePurchaseResponse(requestId);
+        }
+
+        SeckillBucketService.SelectedBucket selectedBucket;
+        try {
+            selectedBucket = repository.selectBucket(activityId, skuId);
+        } catch (SeckillStockNotEnoughException exception) {
+            entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
+            return stockNotEnoughResponse(requestId);
+        }
+
+        SeckillRepository.SnapshotRegistration snapshotRegistration = repository.registerBucketSnapshot(
+                requestId,
+                sku.id(),
+                activityId,
+                skuId,
+                userId,
+                SECKILL_QUANTITY,
+                selectedBucket);
+        if (snapshotRegistration.outcome() == SeckillRepository.SnapshotRegistrationOutcome.REQUEST_DUPLICATE) {
+            return responseFromExistingResultOrProcessing(requestId);
+        }
+        if (snapshotRegistration.outcome() == SeckillRepository.SnapshotRegistrationOutcome.ACTIVE_DUPLICATE) {
+            entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
+            return duplicatePurchaseResponse(requestId);
+        }
+
+        StockDeductionResult deductionResult;
+        try {
+            deductionResult = repository.recordBucketDeductionFact(
+                    requestId,
+                    activityId,
+                    skuId,
+                    selectedBucket,
+                    SECKILL_QUANTITY);
+        } catch (SeckillStockNotEnoughException exception) {
+            entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
+            repository.markRegisteredSnapshotFailed(requestId, "Stock not enough");
+            return stockNotEnoughResponse(requestId);
+        }
+        if (deductionResult.code() == DUPLICATE_PURCHASE) {
+            entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
+            repository.markRegisteredSnapshotFailed(requestId, "Duplicate purchase");
+            return duplicatePurchaseResponse(requestId);
+        }
+        if (deductionResult.code() != DEDUCT_SUCCESS) {
+            entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
+            repository.markRegisteredSnapshotFailed(requestId, "Seckill failed");
+            return seckillFailedResponse(requestId);
+        }
+        return processingResponse(requestId);
     }
 
     private SeckillSubmitResponse doSubmitWithReservationGuard(String requestId,
@@ -399,9 +519,10 @@ public class SeckillServiceImpl implements SeckillService {
                                                             Long skuId,
                                                             Long userId,
                                                             SeckillSku sku,
+                                                            Instant activityEndAt,
                                                             String requestId) {
         try (SeckillHotspotGuard.HotspotPermit ignored = hotspotGuard.acquire(activityId, skuId)) {
-            return doSubmit(activityId, skuId, userId, sku, requestId);
+            return doSubmit(activityId, skuId, userId, sku, activityEndAt, requestId);
         }
     }
 
@@ -446,6 +567,30 @@ public class SeckillServiceImpl implements SeckillService {
         return new SeckillSubmitResponse(requestId, "FAILED", "Seckill failed");
     }
 
+    private SeckillSubmitResponse responseFromExistingResultOrProcessing(String requestId) {
+        SeckillResult result = repository.result(requestId);
+        if (result == null) {
+            return processingResponse(requestId);
+        }
+        return new SeckillSubmitResponse(result.requestId(), result.status(), result.message());
+    }
+
+    private SeckillSubmitResponse processingResponse(String requestId) {
+        return new SeckillSubmitResponse(requestId, "PROCESSING", "Processing");
+    }
+
+    private SeckillSubmitResponse stockNotEnoughResponse(String requestId) {
+        return new SeckillSubmitResponse(requestId, "FAILED", "Stock not enough");
+    }
+
+    private SeckillSubmitResponse duplicatePurchaseResponse(String requestId) {
+        return new SeckillSubmitResponse(requestId, "FAILED", "Duplicate purchase");
+    }
+
+    private SeckillSubmitResponse seckillFailedResponse(String requestId) {
+        return new SeckillSubmitResponse(requestId, "FAILED", "Seckill failed");
+    }
+
     private String normalizeRequestId(String requestId) {
         if (requestId == null || requestId.isBlank()) {
             return UUID.randomUUID().toString();
@@ -468,6 +613,12 @@ public class SeckillServiceImpl implements SeckillService {
     private boolean reservationGuardEnabled() {
         return guardRepository != null
                 && properties.getReservationGuard().isEnabled()
+                && repository.isBucketModeEnabled();
+    }
+
+    private boolean asyncEntryGuardEnabled() {
+        return entryGuard != null
+                && entryGuard.enabled()
                 && repository.isBucketModeEnabled();
     }
 
