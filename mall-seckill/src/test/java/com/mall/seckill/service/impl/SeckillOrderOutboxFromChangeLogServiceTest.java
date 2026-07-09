@@ -52,18 +52,20 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
 
     private SeckillProperties properties;
     private SeckillOrderOutboxFromChangeLogService service;
+    private TestTransactionManager transactionManager;
 
     @BeforeEach
     void setUp() {
         properties = new SeckillProperties();
         properties.getOrderOutbox().setEnabled(true);
+        transactionManager = new TestTransactionManager();
         service = new SeckillOrderOutboxFromChangeLogService(
                 changeLogMapper,
                 seckillRepository,
                 messageRepository,
                 messagePublisher,
                 new ObjectMapper(),
-                new TransactionTemplate(new TestTransactionManager()),
+                new TransactionTemplate(transactionManager),
                 properties);
     }
 
@@ -89,6 +91,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         int drained = service.drainOnce();
 
         assertThat(drained).isEqualTo(1);
+        assertThat(transactionManager.committed()).isEqualTo(1);
+        assertThat(transactionManager.rolledBack()).isZero();
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-1"), payloadCaptor.capture(), eq(7L));
         JsonNode payload = new ObjectMapper().readTree(payloadCaptor.getValue());
@@ -189,6 +193,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         assertThatCode(() -> assertThat(service.drainOnce()).isZero())
                 .doesNotThrowAnyException();
 
+        assertThat(transactionManager.committed()).isZero();
+        assertThat(transactionManager.rolledBack()).isEqualTo(1);
         verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-1"), anyString(), eq(7L));
         verify(changeLogMapper).updateStatusByShard(
                 11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
@@ -308,6 +314,9 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
 
     private static class TestTransactionManager implements PlatformTransactionManager {
 
+        private int committed;
+        private int rolledBack;
+
         @Override
         public TransactionStatus getTransaction(TransactionDefinition definition) {
             return new SimpleTransactionStatus();
@@ -315,10 +324,20 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
 
         @Override
         public void commit(TransactionStatus status) {
+            committed++;
         }
 
         @Override
         public void rollback(TransactionStatus status) {
+            rolledBack++;
+        }
+
+        int committed() {
+            return committed;
+        }
+
+        int rolledBack() {
+            return rolledBack;
         }
     }
 }
