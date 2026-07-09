@@ -37,7 +37,6 @@ public class SeckillBucketService {
     static final String STATUS_EMPTY = "EMPTY";
     static final String CHANGE_DEDUCT = "DEDUCT";
     static final String CHANGE_RELEASE = "RELEASE";
-    static final String CHANGE_STATUS_NEW = "NEW";
     // DEDUCT submit hot path skips the post-update bucket read; ledger consumers use quantityDelta.
     static final int AFTER_QUANTITY_UNKNOWN = -1;
 
@@ -527,7 +526,7 @@ public class SeckillBucketService {
         changeLog.setChangeType(changeType);
         changeLog.setQuantityDelta(quantityDelta);
         changeLog.setAfterQuantity(afterQuantity);
-        changeLog.setStatus(CHANGE_STATUS_NEW);
+        changeLog.setStatus(SeckillStockChangeLogStatus.NEW);
         changeLog.setCreatedAt(now);
         changeLog.setUpdatedAt(now);
         return changeLog;

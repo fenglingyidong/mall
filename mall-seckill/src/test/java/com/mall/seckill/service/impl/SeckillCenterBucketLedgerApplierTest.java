@@ -62,6 +62,31 @@ class SeckillCenterBucketLedgerApplierTest {
     }
 
     @Test
+    void shouldApplyOutboxedChangeLogToCenterBucketAndMarkApplied() {
+        SeckillStockChangeLogEntity changeLog = changeLog(3L, -1, SeckillStockChangeLogStatus.OUTBOXED);
+        when(changeLogMapper.selectById(3L)).thenReturn(changeLog);
+        when(changeLogMapper.updateStatus(3L,
+                SeckillStockChangeLogStatus.OUTBOXED,
+                SeckillCenterBucketLedgerApplier.STATUS_PROCESSING)).thenReturn(1);
+        when(bucketMapper.applyCenterQuantityDelta(1L, 1001L, -1)).thenReturn(1);
+        when(changeLogMapper.updateStatusByIds(List.of(3L),
+                SeckillCenterBucketLedgerApplier.STATUS_PROCESSING,
+                SeckillCenterBucketLedgerApplier.STATUS_APPLIED)).thenReturn(1);
+
+        boolean applied = applier.apply(3L);
+
+        assertThat(applied).isTrue();
+        InOrder order = inOrder(changeLogMapper, bucketMapper);
+        order.verify(changeLogMapper).updateStatus(3L,
+                SeckillStockChangeLogStatus.OUTBOXED,
+                SeckillCenterBucketLedgerApplier.STATUS_PROCESSING);
+        order.verify(bucketMapper).applyCenterQuantityDelta(1L, 1001L, -1);
+        order.verify(changeLogMapper).updateStatusByIds(List.of(3L),
+                SeckillCenterBucketLedgerApplier.STATUS_PROCESSING,
+                SeckillCenterBucketLedgerApplier.STATUS_APPLIED);
+    }
+
+    @Test
     void shouldApplyReleaseChangeLogToCenterBucketAndMarkApplied() {
         SeckillStockChangeLogEntity changeLog = changeLog(2L, 1, SeckillCenterBucketLedgerApplier.STATUS_NEW);
         when(changeLogMapper.selectById(2L)).thenReturn(changeLog);

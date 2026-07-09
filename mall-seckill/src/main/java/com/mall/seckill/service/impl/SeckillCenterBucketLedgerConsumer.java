@@ -36,17 +36,24 @@ public class SeckillCenterBucketLedgerConsumer {
 
     @Scheduled(fixedDelayString = "${mall.seckill.bucket.center-ledger.fixed-delay:1000}")
     public void consume() {
+        String sourceStatus = sourceStatus();
         List<Long> bucketShardKeys = properties.getBucket().getRouting().getBucketShardKeys();
         if (bucketShardKeys == null || bucketShardKeys.isEmpty()) {
-            consume(changeLogMapper.selectByStatusForConsume(SeckillCenterBucketLedgerApplier.STATUS_NEW, batchSize()));
+            consume(changeLogMapper.selectByStatusForConsume(sourceStatus, batchSize()));
             return;
         }
         for (Long bucketShardKey : bucketShardKeys) {
             consume(changeLogMapper.selectByStatusForConsumeByShard(
                     bucketShardKey,
-                    SeckillCenterBucketLedgerApplier.STATUS_NEW,
+                    sourceStatus,
                     batchSize()));
         }
+    }
+
+    private String sourceStatus() {
+        return properties.getOrderOutbox().isEnabled()
+                ? SeckillStockChangeLogStatus.OUTBOXED
+                : SeckillStockChangeLogStatus.NEW;
     }
 
     private void consume(List<SeckillStockChangeLogEntity> changeLogs) {

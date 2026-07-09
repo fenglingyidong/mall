@@ -15,9 +15,9 @@ import java.util.Map;
 @Component
 public class SeckillCenterBucketLedgerApplier {
 
-    static final String STATUS_NEW = "NEW";
-    static final String STATUS_PROCESSING = "PROCESSING";
-    static final String STATUS_APPLIED = "APPLIED";
+    static final String STATUS_NEW = SeckillStockChangeLogStatus.NEW;
+    static final String STATUS_PROCESSING = SeckillStockChangeLogStatus.LEDGER_PROCESSING;
+    static final String STATUS_APPLIED = SeckillStockChangeLogStatus.APPLIED;
 
     private final SeckillStockChangeLogMapper changeLogMapper;
     private final SeckillStockBucketMapper bucketMapper;
@@ -72,16 +72,28 @@ public class SeckillCenterBucketLedgerApplier {
         }
         List<SeckillStockChangeLogEntity> claimedLogs = new ArrayList<>();
         for (SeckillStockChangeLogEntity changeLog : changeLogs) {
-            if (changeLog == null || changeLog.getId() == null || !STATUS_NEW.equals(changeLog.getStatus())) {
+            String sourceStatus = claimableSourceStatus(changeLog);
+            if (sourceStatus == null) {
                 continue;
             }
             validate(changeLog);
-            int claimed = updateStatus(changeLog, STATUS_NEW, STATUS_PROCESSING);
+            int claimed = updateStatus(changeLog, sourceStatus, STATUS_PROCESSING);
             if (claimed > 0) {
                 claimedLogs.add(changeLog);
             }
         }
         return claimedLogs;
+    }
+
+    private String claimableSourceStatus(SeckillStockChangeLogEntity changeLog) {
+        if (changeLog == null || changeLog.getId() == null) {
+            return null;
+        }
+        String status = changeLog.getStatus();
+        if (STATUS_NEW.equals(status) || SeckillStockChangeLogStatus.OUTBOXED.equals(status)) {
+            return status;
+        }
+        return null;
     }
 
     private Map<LedgerKey, Integer> aggregateDeltas(List<SeckillStockChangeLogEntity> claimedLogs) {

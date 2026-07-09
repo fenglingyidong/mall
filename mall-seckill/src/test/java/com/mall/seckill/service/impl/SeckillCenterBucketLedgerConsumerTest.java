@@ -38,7 +38,7 @@ class SeckillCenterBucketLedgerConsumerTest {
     void shouldConsumeNewChangeLogsWithConfiguredBatchSize() {
         SeckillStockChangeLogEntity first = changeLog(1L, 1001L);
         SeckillStockChangeLogEntity second = changeLog(2L, 1001L);
-        when(changeLogMapper.selectByStatusForConsume(SeckillCenterBucketLedgerApplier.STATUS_NEW, 2))
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 2))
                 .thenReturn(List.of(first, second));
 
         consumer.consume();
@@ -47,10 +47,51 @@ class SeckillCenterBucketLedgerConsumerTest {
     }
 
     @Test
+    void shouldConsumeOutboxedChangeLogsWhenOrderOutboxEnabled() {
+        properties.getOrderOutbox().setEnabled(true);
+        SeckillStockChangeLogEntity changeLog = changeLog(1L, 1001L);
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.OUTBOXED, 2))
+                .thenReturn(List.of(changeLog));
+
+        consumer.consume();
+
+        verify(applier).apply(List.of(changeLog));
+    }
+
+    @Test
+    void shouldConsumeNewChangeLogsByShardWhenOrderOutboxDisabled() {
+        properties.getBucket().getRouting().setBucketShardKeys(List.of(3L));
+        SeckillStockChangeLogEntity changeLog = changeLog(1L, 1001L);
+        when(changeLogMapper.selectByStatusForConsumeByShard(3L, SeckillStockChangeLogStatus.NEW, 2))
+                .thenReturn(List.of(changeLog));
+
+        consumer.consume();
+
+        verify(applier).apply(List.of(changeLog));
+    }
+
+    @Test
+    void shouldConsumeOutboxedChangeLogsByShardWhenOrderOutboxEnabled() {
+        properties.getOrderOutbox().setEnabled(true);
+        properties.getBucket().getRouting().setBucketShardKeys(List.of(3L, 5L));
+        SeckillStockChangeLogEntity first = changeLog(1L, 1001L);
+        SeckillStockChangeLogEntity second = changeLog(2L, 1002L);
+        when(changeLogMapper.selectByStatusForConsumeByShard(3L, SeckillStockChangeLogStatus.OUTBOXED, 2))
+                .thenReturn(List.of(first));
+        when(changeLogMapper.selectByStatusForConsumeByShard(5L, SeckillStockChangeLogStatus.OUTBOXED, 2))
+                .thenReturn(List.of(second));
+
+        consumer.consume();
+
+        verify(applier).apply(List.of(first));
+        verify(applier).apply(List.of(second));
+    }
+
+    @Test
     void shouldContinueWhenOneLedgerGroupFails() {
         SeckillStockChangeLogEntity first = changeLog(1L, 1001L);
         SeckillStockChangeLogEntity second = changeLog(2L, 1002L);
-        when(changeLogMapper.selectByStatusForConsume(SeckillCenterBucketLedgerApplier.STATUS_NEW, 2))
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 2))
                 .thenReturn(List.of(first, second));
         doThrow(new IllegalStateException("apply failed"))
                 .when(applier).apply(List.of(first));
@@ -64,12 +105,12 @@ class SeckillCenterBucketLedgerConsumerTest {
     @Test
     void shouldClampBatchSizeToPositiveValue() {
         properties.getBucket().getCenterLedger().setBatchSize(0);
-        when(changeLogMapper.selectByStatusForConsume(SeckillCenterBucketLedgerApplier.STATUS_NEW, 1))
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1))
                 .thenReturn(List.of());
 
         consumer.consume();
 
-        verify(changeLogMapper).selectByStatusForConsume(SeckillCenterBucketLedgerApplier.STATUS_NEW, 1);
+        verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1);
     }
 
     private SeckillStockChangeLogEntity changeLog(Long id, Long skuId) {

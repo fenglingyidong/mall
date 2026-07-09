@@ -25,7 +25,6 @@ public class SeckillBucketTransferService {
 
     static final String CHANGE_TRANSFER_OUT = "TRANSFER_OUT";
     static final String CHANGE_TRANSFER_IN = "TRANSFER_IN";
-    static final String CHANGE_STATUS_NEW = "NEW";
     private static final int SOURCE_RESERVE_QUANTITY = 1;
 
     private final SeckillStockBucketMapper bucketMapper;
@@ -261,7 +260,7 @@ public class SeckillBucketTransferService {
         changeLog.setChangeType(changeType);
         changeLog.setQuantityDelta(quantityDelta);
         changeLog.setAfterQuantity(bucket.getSaleableQuantity());
-        changeLog.setStatus(CHANGE_STATUS_NEW);
+        changeLog.setStatus(SeckillStockChangeLogStatus.NEW);
         changeLog.setCreatedAt(now);
         changeLog.setUpdatedAt(now);
         return changeLog;

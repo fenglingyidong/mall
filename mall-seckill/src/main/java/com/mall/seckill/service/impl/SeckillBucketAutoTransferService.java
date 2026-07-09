@@ -250,7 +250,7 @@ public class SeckillBucketAutoTransferService {
         changeLog.setChangeType(changeType);
         changeLog.setQuantityDelta(quantityDelta);
         changeLog.setAfterQuantity(bucket.getSaleableQuantity());
-        changeLog.setStatus(SeckillBucketTransferService.CHANGE_STATUS_NEW);
+        changeLog.setStatus(SeckillStockChangeLogStatus.NEW);
         changeLog.setCreatedAt(now);
         changeLog.setUpdatedAt(now);
         return changeLog;
