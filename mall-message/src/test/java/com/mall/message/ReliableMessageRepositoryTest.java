@@ -94,6 +94,22 @@ class ReliableMessageRepositoryTest {
                 .contains("bucket_shard_key");
     }
 
+    @Test
+    void existsByBusinessKeyAndRoutingKeyShouldFilterNullShardExactly() {
+        ReliableMessageRepository repository = new ReliableMessageRepository(messageMapper);
+        when(messageMapper.selectCount(org.mockito.ArgumentMatchers.any())).thenReturn(1L);
+
+        boolean exists = repository.existsByBusinessKeyAndRoutingKey("req-1", MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY, null);
+
+        assertThat(exists).isTrue();
+        Wrapper<MqMessageEntity> wrapper = capturedSelectCountWrapper();
+        assertThat(wrapper.getSqlSegment())
+                .contains("business_key")
+                .contains("routing_key")
+                .contains("bucket_shard_key")
+                .contains("IS NULL");
+    }
+
     private Wrapper<MqMessageEntity> capturedUpdateWrapper() {
         ArgumentCaptor<Wrapper<MqMessageEntity>> wrapperCaptor = ArgumentCaptor.forClass(Wrapper.class);
         verify(messageMapper).update(isNull(), wrapperCaptor.capture());

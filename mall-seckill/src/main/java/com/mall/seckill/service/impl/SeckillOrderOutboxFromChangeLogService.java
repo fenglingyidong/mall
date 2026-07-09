@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Service
@@ -24,6 +25,7 @@ public class SeckillOrderOutboxFromChangeLogService {
     private static final Logger log = LoggerFactory.getLogger(SeckillOrderOutboxFromChangeLogService.class);
     private static final int MIN_BATCH_SIZE = 1;
     private static final int MAX_BATCH_SIZE = 1000;
+    private static final long OUTBOXING_STALE_SECONDS = 60L;
     private static final String CHANGE_TYPE_DEDUCT = "DEDUCT";
 
     private final SeckillStockChangeLogMapper changeLogMapper;
@@ -57,6 +59,11 @@ public class SeckillOrderOutboxFromChangeLogService {
         }
 
         int batchSize = Math.min(MAX_BATCH_SIZE, Math.max(MIN_BATCH_SIZE, config.getBatchSize()));
+        changeLogMapper.resetStaleStatus(
+                SeckillStockChangeLogStatus.OUTBOXING,
+                SeckillStockChangeLogStatus.NEW,
+                LocalDateTime.now().minusSeconds(OUTBOXING_STALE_SECONDS),
+                batchSize);
         List<SeckillStockChangeLogEntity> changeLogs = changeLogMapper.selectByStatusForConsume(
                 SeckillStockChangeLogStatus.NEW,
                 batchSize);

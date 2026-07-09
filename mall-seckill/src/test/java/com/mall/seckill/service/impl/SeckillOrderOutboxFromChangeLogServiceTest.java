@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -23,12 +24,14 @@ import org.springframework.transaction.support.SimpleTransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -87,12 +90,22 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         when(changeLogMapper.updateStatusByShard(
                 11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
                 .thenReturn(1);
+        LocalDateTime startedAt = LocalDateTime.now();
 
         int drained = service.drainOnce();
 
         assertThat(drained).isEqualTo(1);
         assertThat(transactionManager.committed()).isEqualTo(1);
         assertThat(transactionManager.rolledBack()).isZero();
+        ArgumentCaptor<LocalDateTime> staleBeforeCaptor = ArgumentCaptor.forClass(LocalDateTime.class);
+        InOrder inOrder = inOrder(changeLogMapper);
+        inOrder.verify(changeLogMapper).resetStaleStatus(
+                eq(SeckillStockChangeLogStatus.OUTBOXING),
+                eq(SeckillStockChangeLogStatus.NEW),
+                staleBeforeCaptor.capture(),
+                eq(500));
+        inOrder.verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500);
+        assertThat(staleBeforeCaptor.getValue()).isBefore(startedAt);
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-1"), payloadCaptor.capture(), eq(7L));
         JsonNode payload = new ObjectMapper().readTree(payloadCaptor.getValue());
@@ -255,6 +268,11 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
 
         assertThat(drained).isZero();
         verifyNoInteractions(seckillRepository, messageRepository, messagePublisher);
+        verify(changeLogMapper).resetStaleStatus(
+                eq(SeckillStockChangeLogStatus.OUTBOXING),
+                eq(SeckillStockChangeLogStatus.NEW),
+                org.mockito.ArgumentMatchers.any(LocalDateTime.class),
+                eq(500));
         verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500);
         verify(changeLogMapper).updateStatusByShard(
                 11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING);
@@ -270,6 +288,11 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         int drained = service.drainOnce();
 
         assertThat(drained).isZero();
+        verify(changeLogMapper).resetStaleStatus(
+                eq(SeckillStockChangeLogStatus.OUTBOXING),
+                eq(SeckillStockChangeLogStatus.NEW),
+                org.mockito.ArgumentMatchers.any(LocalDateTime.class),
+                eq(1));
         verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1);
     }
 
@@ -282,6 +305,11 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         int drained = service.drainOnce();
 
         assertThat(drained).isZero();
+        verify(changeLogMapper).resetStaleStatus(
+                eq(SeckillStockChangeLogStatus.OUTBOXING),
+                eq(SeckillStockChangeLogStatus.NEW),
+                org.mockito.ArgumentMatchers.any(LocalDateTime.class),
+                eq(1000));
         verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1000);
     }
 

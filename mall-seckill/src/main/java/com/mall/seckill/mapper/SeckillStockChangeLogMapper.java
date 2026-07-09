@@ -7,6 +7,7 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Mapper
@@ -39,6 +40,12 @@ public interface SeckillStockChangeLogMapper extends BaseMapper<SeckillStockChan
                             @Param("bucketShardKey") Long bucketShardKey,
                             @Param("expectedStatus") String expectedStatus,
                             @Param("nextStatus") String nextStatus);
+
+    @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = NOW() WHERE status = #{expectedStatus} AND updated_at < #{before} LIMIT #{limit}")
+    int resetStaleStatus(@Param("expectedStatus") String expectedStatus,
+                         @Param("nextStatus") String nextStatus,
+                         @Param("before") LocalDateTime before,
+                         @Param("limit") Integer limit);
 
     @Update({
             "<script>",

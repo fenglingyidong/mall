@@ -124,10 +124,15 @@ public class ReliableMessageRepository {
     }
 
     public boolean existsByBusinessKeyAndRoutingKey(String businessKey, String routingKey, Long bucketShardKey) {
-        Long count = messageMapper.selectCount(Wrappers.<MqMessageEntity>lambdaQuery()
+        var wrapper = Wrappers.<MqMessageEntity>lambdaQuery()
                 .eq(MqMessageEntity::getBusinessKey, businessKey)
-                .eq(MqMessageEntity::getRoutingKey, routingKey)
-                .eq(bucketShardKey != null, MqMessageEntity::getBucketShardKey, bucketShardKey));
+                .eq(MqMessageEntity::getRoutingKey, routingKey);
+        if (bucketShardKey == null) {
+            wrapper.isNull(MqMessageEntity::getBucketShardKey);
+        } else {
+            wrapper.eq(MqMessageEntity::getBucketShardKey, bucketShardKey);
+        }
+        Long count = messageMapper.selectCount(wrapper);
         return count != null && count > 0;
     }
 
