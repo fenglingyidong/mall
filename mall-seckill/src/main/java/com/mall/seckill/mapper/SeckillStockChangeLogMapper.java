@@ -41,24 +41,12 @@ public interface SeckillStockChangeLogMapper extends BaseMapper<SeckillStockChan
                             @Param("expectedStatus") String expectedStatus,
                             @Param("nextStatus") String nextStatus);
 
-    @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = #{claimedAt} WHERE id = #{id} AND status = #{expectedStatus}")
-    int claimStatus(@Param("id") Long id,
-                    @Param("expectedStatus") String expectedStatus,
-                    @Param("nextStatus") String nextStatus,
-                    @Param("claimedAt") LocalDateTime claimedAt);
-
     @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = #{claimedAt} WHERE id = #{id} AND bucket_shard_key = #{bucketShardKey} AND status = #{expectedStatus}")
     int claimStatusByShard(@Param("id") Long id,
                            @Param("bucketShardKey") Long bucketShardKey,
                            @Param("expectedStatus") String expectedStatus,
                            @Param("nextStatus") String nextStatus,
                            @Param("claimedAt") LocalDateTime claimedAt);
-
-    @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = NOW() WHERE id = #{id} AND status = #{expectedStatus} AND updated_at = #{claimedAt}")
-    int updateStatusIfClaimed(@Param("id") Long id,
-                              @Param("expectedStatus") String expectedStatus,
-                              @Param("nextStatus") String nextStatus,
-                              @Param("claimedAt") LocalDateTime claimedAt);
 
     @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = NOW() WHERE id = #{id} AND bucket_shard_key = #{bucketShardKey} AND status = #{expectedStatus} AND updated_at = #{claimedAt}")
     int updateStatusByShardIfClaimed(@Param("id") Long id,
@@ -71,12 +59,6 @@ public interface SeckillStockChangeLogMapper extends BaseMapper<SeckillStockChan
     List<SeckillStockChangeLogEntity> selectStaleIdsByStatus(@Param("status") String status,
                                                              @Param("before") LocalDateTime before,
                                                              @Param("limit") Integer limit);
-
-    @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = NOW() WHERE id = #{id} AND status = #{expectedStatus} AND updated_at < #{before}")
-    int resetStaleStatus(@Param("id") Long id,
-                         @Param("expectedStatus") String expectedStatus,
-                         @Param("nextStatus") String nextStatus,
-                         @Param("before") LocalDateTime before);
 
     @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = NOW() WHERE id = #{id} AND bucket_shard_key = #{bucketShardKey} AND status = #{expectedStatus} AND updated_at < #{before}")
     int resetStaleStatusByShard(@Param("id") Long id,

@@ -149,34 +149,22 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
                 eq(500));
         inOrder.verify(changeLogMapper).resetStaleStatusByShard(
                 21L, 9L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW, staleBeforeCaptor.getValue());
-        inOrder.verify(changeLogMapper).resetStaleStatus(
-                22L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW, staleBeforeCaptor.getValue());
         inOrder.verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500);
         assertThat(staleBeforeCaptor.getValue()).isBefore(startedAt);
+        verify(changeLogMapper, never()).resetStaleStatusByShard(
+                eq(22L), any(), anyString(), anyString(), any(LocalDateTime.class));
     }
 
     @Test
-    void shouldClaimAndOutboxLegacyChangeLogWithClaimTimestamp() {
+    void shouldSkipUnshardedChangeLogWithoutClaimOrOutbox() {
         SeckillStockChangeLogEntity changeLog = deductChangeLog(13L, "req-legacy", null);
-        changeLog.setChangeType("RELEASE");
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(changeLog));
-        when(changeLogMapper.claimStatus(
-                eq(13L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
-                .thenReturn(1);
-        when(changeLogMapper.updateStatusIfClaimed(
-                eq(13L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
-                .thenReturn(1);
 
         int drained = service.drainOnce();
 
-        assertThat(drained).isEqualTo(1);
-        ArgumentCaptor<LocalDateTime> claimedAtCaptor = ArgumentCaptor.forClass(LocalDateTime.class);
-        verify(changeLogMapper).claimStatus(
-                eq(13L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), claimedAtCaptor.capture());
-        assertThat(claimedAtCaptor.getValue().getNano()).isZero();
-        verify(changeLogMapper).updateStatusIfClaimed(
-                13L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED, claimedAtCaptor.getValue());
+        assertThat(drained).isZero();
+        verifyNoInteractions(seckillRepository, messageRepository, messagePublisher);
         verify(changeLogMapper, never()).claimStatusByShard(
                 eq(13L), any(), anyString(), anyString(), any(LocalDateTime.class));
     }
