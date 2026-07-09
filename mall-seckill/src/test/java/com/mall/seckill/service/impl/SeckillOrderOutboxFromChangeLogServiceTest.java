@@ -245,6 +245,29 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
     }
 
     @Test
+    void shouldMarkOutboxFailedWhenDeductRequestIdIsBlank() {
+        SeckillStockChangeLogEntity changeLog = deductChangeLog();
+        changeLog.setRequestId(" ");
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
+                .thenReturn(List.of(changeLog));
+        when(changeLogMapper.claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
+                .thenReturn(1);
+
+        assertThatCode(() -> assertThat(service.drainOnce()).isZero())
+                .doesNotThrowAnyException();
+
+        assertThat(transactionManager.committed()).isZero();
+        assertThat(transactionManager.rolledBack()).isEqualTo(1);
+        ArgumentCaptor<LocalDateTime> claimedAtCaptor = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(changeLogMapper).claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), claimedAtCaptor.capture());
+        verify(changeLogMapper).updateStatusByShardIfClaimed(
+                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED, claimedAtCaptor.getValue());
+        verifyNoInteractions(seckillRepository, messageRepository, messagePublisher);
+    }
+
+    @Test
     void shouldMarkOutboxFailedWhenOutboxedUpdateReturnsZeroAfterEnqueue() {
         SeckillStockChangeLogEntity changeLog = deductChangeLog();
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
@@ -262,6 +285,9 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         when(changeLogMapper.updateStatusByShardIfClaimed(
                 eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
                 .thenReturn(0);
+        when(changeLogMapper.updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOX_FAILED), any(LocalDateTime.class)))
+                .thenReturn(0);
 
         assertThatCode(() -> assertThat(service.drainOnce()).isZero())
                 .doesNotThrowAnyException();
@@ -269,10 +295,17 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         assertThat(transactionManager.committed()).isZero();
         assertThat(transactionManager.rolledBack()).isEqualTo(1);
         verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-1"), anyString(), eq(7L));
+        ArgumentCaptor<LocalDateTime> claimedAtCaptor = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(changeLogMapper).claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), claimedAtCaptor.capture());
         verify(changeLogMapper).updateStatusByShardIfClaimed(
-                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOX_FAILED), any(LocalDateTime.class));
+                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED, claimedAtCaptor.getValue());
+        verify(changeLogMapper).updateStatusByShardIfClaimed(
+                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED, claimedAtCaptor.getValue());
         verify(changeLogMapper, never()).updateStatusByShard(
                 11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
+        verify(changeLogMapper, never()).updateStatus(
+                11L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
     }
 
     @Test
