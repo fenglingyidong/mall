@@ -52,6 +52,9 @@ class SeckillEntryGuardTest {
         assertThatThrownBy(() -> guard.acquireBuyer(1L, 1001L, 101L, "r1", Instant.now().plusSeconds(60)))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("Seckill entry guard unavailable");
+        assertThatThrownBy(() -> guard.releaseBuyer(1L, 1001L, 101L, "r1"))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("Seckill entry guard unavailable");
     }
 
     @Test
