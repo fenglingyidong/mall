@@ -103,10 +103,14 @@ public class SeckillOrderOutboxFromChangeLogService {
         }
         try {
             return Boolean.TRUE.equals(transactionTemplate.execute(status -> processClaimed(claimed)));
-        } catch (RuntimeException exception) {
-            log.warn("Failed to build seckill order outbox from change log, changeLogId={}, requestId={}",
+        } catch (NonRetryableOutboxException exception) {
+            log.warn("Failed to build seckill order outbox from non-retryable change log, changeLogId={}, requestId={}",
                     changeLog.getId(), changeLog.getRequestId(), exception);
             markFailed(claimed);
+            return false;
+        } catch (RuntimeException exception) {
+            log.warn("Retryable failure while building seckill order outbox from change log, changeLogId={}, requestId={}",
+                    changeLog.getId(), changeLog.getRequestId(), exception);
             return false;
         }
     }
@@ -136,7 +140,7 @@ public class SeckillOrderOutboxFromChangeLogService {
         String requestId = changeLog.getRequestId();
         Long bucketShardKey = changeLog.getBucketShardKey();
         if (requestId == null || requestId.isBlank()) {
-            throw new IllegalStateException("Seckill change log requestId is blank");
+            throw new NonRetryableOutboxException("Seckill change log requestId is blank");
         }
 
         boolean outboxExists = messageRepository.existsByBusinessKeyAndRoutingKey(
@@ -213,5 +217,12 @@ public class SeckillOrderOutboxFromChangeLogService {
     }
 
     private record ClaimedChangeLog(SeckillStockChangeLogEntity changeLog, LocalDateTime claimedAt) {
+    }
+
+    private static class NonRetryableOutboxException extends RuntimeException {
+
+        NonRetryableOutboxException(String message) {
+            super(message);
+        }
     }
 }

@@ -212,7 +212,7 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
     }
 
     @Test
-    void shouldMarkOutboxFailedAndContinueWhenLookupThrows() {
+    void shouldKeepOutboxingAndContinueWhenLookupThrows() {
         SeckillStockChangeLogEntity changeLog = deductChangeLog();
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(changeLog));
@@ -227,7 +227,9 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
 
         assertThatCode(() -> assertThat(service.drainOnce()).isZero())
                 .doesNotThrowAnyException();
-        verify(changeLogMapper).updateStatusByShardIfClaimed(
+        assertThat(transactionManager.committed()).isZero();
+        assertThat(transactionManager.rolledBack()).isEqualTo(1);
+        verify(changeLogMapper, never()).updateStatusByShardIfClaimed(
                 eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOX_FAILED), any(LocalDateTime.class));
         verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString(), eq(7L));
     }
@@ -256,7 +258,7 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
     }
 
     @Test
-    void shouldMarkOutboxFailedWhenOutboxedUpdateReturnsZeroAfterEnqueue() {
+    void shouldKeepOutboxingWhenOutboxedUpdateReturnsZeroAfterEnqueue() {
         SeckillStockChangeLogEntity changeLog = deductChangeLog();
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(changeLog));
@@ -273,9 +275,6 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         when(changeLogMapper.updateStatusByShardIfClaimed(
                 eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
                 .thenReturn(0);
-        when(changeLogMapper.updateStatusByShardIfClaimed(
-                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOX_FAILED), any(LocalDateTime.class)))
-                .thenReturn(0);
 
         assertThatCode(() -> assertThat(service.drainOnce()).isZero())
                 .doesNotThrowAnyException();
@@ -288,8 +287,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
                 eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), claimedAtCaptor.capture());
         verify(changeLogMapper).updateStatusByShardIfClaimed(
                 11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED, claimedAtCaptor.getValue());
-        verify(changeLogMapper).updateStatusByShardIfClaimed(
-                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED, claimedAtCaptor.getValue());
+        verify(changeLogMapper, never()).updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOX_FAILED), any(LocalDateTime.class));
         verify(changeLogMapper, never()).updateStatusByShard(
                 11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
         verify(changeLogMapper, never()).updateStatus(
@@ -330,7 +329,9 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         int drained = service.drainOnce();
 
         assertThat(drained).isEqualTo(1);
-        verify(changeLogMapper).updateStatusByShardIfClaimed(
+        assertThat(transactionManager.committed()).isEqualTo(1);
+        assertThat(transactionManager.rolledBack()).isEqualTo(1);
+        verify(changeLogMapper, never()).updateStatusByShardIfClaimed(
                 eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOX_FAILED), any(LocalDateTime.class));
         verify(changeLogMapper).updateStatusByShardIfClaimed(
                 eq(12L), eq(8L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class));
