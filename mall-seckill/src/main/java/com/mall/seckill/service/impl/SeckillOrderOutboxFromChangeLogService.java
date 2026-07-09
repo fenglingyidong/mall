@@ -59,11 +59,7 @@ public class SeckillOrderOutboxFromChangeLogService {
         }
 
         int batchSize = Math.min(MAX_BATCH_SIZE, Math.max(MIN_BATCH_SIZE, config.getBatchSize()));
-        changeLogMapper.resetStaleStatus(
-                SeckillStockChangeLogStatus.OUTBOXING,
-                SeckillStockChangeLogStatus.NEW,
-                LocalDateTime.now().minusSeconds(OUTBOXING_STALE_SECONDS),
-                batchSize);
+        resetStaleOutboxing(batchSize);
         List<SeckillStockChangeLogEntity> changeLogs = changeLogMapper.selectByStatusForConsume(
                 SeckillStockChangeLogStatus.NEW,
                 batchSize);
@@ -74,6 +70,19 @@ public class SeckillOrderOutboxFromChangeLogService {
             }
         }
         return drained;
+    }
+
+    private void resetStaleOutboxing(int batchSize) {
+        List<SeckillStockChangeLogEntity> staleChangeLogs = changeLogMapper.selectStaleIdsByStatus(
+                SeckillStockChangeLogStatus.OUTBOXING,
+                LocalDateTime.now().minusSeconds(OUTBOXING_STALE_SECONDS),
+                batchSize);
+        if (staleChangeLogs == null) {
+            return;
+        }
+        for (SeckillStockChangeLogEntity changeLog : staleChangeLogs) {
+            updateStatus(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW);
+        }
     }
 
     private boolean drainOne(SeckillStockChangeLogEntity changeLog) {

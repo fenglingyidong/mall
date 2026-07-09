@@ -41,11 +41,10 @@ public interface SeckillStockChangeLogMapper extends BaseMapper<SeckillStockChan
                             @Param("expectedStatus") String expectedStatus,
                             @Param("nextStatus") String nextStatus);
 
-    @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = NOW() WHERE status = #{expectedStatus} AND updated_at < #{before} LIMIT #{limit}")
-    int resetStaleStatus(@Param("expectedStatus") String expectedStatus,
-                         @Param("nextStatus") String nextStatus,
-                         @Param("before") LocalDateTime before,
-                         @Param("limit") Integer limit);
+    @Select("SELECT id, bucket_shard_key FROM seckill_stock_change_log WHERE status = #{status} AND updated_at < #{before} ORDER BY id LIMIT #{limit}")
+    List<SeckillStockChangeLogEntity> selectStaleIdsByStatus(@Param("status") String status,
+                                                             @Param("before") LocalDateTime before,
+                                                             @Param("limit") Integer limit);
 
     @Update({
             "<script>",

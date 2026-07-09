@@ -99,9 +99,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         assertThat(transactionManager.rolledBack()).isZero();
         ArgumentCaptor<LocalDateTime> staleBeforeCaptor = ArgumentCaptor.forClass(LocalDateTime.class);
         InOrder inOrder = inOrder(changeLogMapper);
-        inOrder.verify(changeLogMapper).resetStaleStatus(
+        inOrder.verify(changeLogMapper).selectStaleIdsByStatus(
                 eq(SeckillStockChangeLogStatus.OUTBOXING),
-                eq(SeckillStockChangeLogStatus.NEW),
                 staleBeforeCaptor.capture(),
                 eq(500));
         inOrder.verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500);
@@ -119,6 +118,36 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         assertThat(payload.get("bucketShardKey").asLong()).isEqualTo(7L);
         verify(changeLogMapper).updateStatusByShard(
                 11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+    }
+
+    @Test
+    void shouldResetStaleOutboxingByShardBeforeSelectingNew() {
+        SeckillStockChangeLogEntity sharded = staleChangeLog(21L, 9L);
+        SeckillStockChangeLogEntity legacy = staleChangeLog(22L, null);
+        when(changeLogMapper.selectStaleIdsByStatus(
+                eq(SeckillStockChangeLogStatus.OUTBOXING),
+                org.mockito.ArgumentMatchers.any(LocalDateTime.class),
+                eq(500)))
+                .thenReturn(List.of(sharded, legacy));
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
+                .thenReturn(List.of());
+        LocalDateTime startedAt = LocalDateTime.now();
+
+        int drained = service.drainOnce();
+
+        assertThat(drained).isZero();
+        ArgumentCaptor<LocalDateTime> staleBeforeCaptor = ArgumentCaptor.forClass(LocalDateTime.class);
+        InOrder inOrder = inOrder(changeLogMapper);
+        inOrder.verify(changeLogMapper).selectStaleIdsByStatus(
+                eq(SeckillStockChangeLogStatus.OUTBOXING),
+                staleBeforeCaptor.capture(),
+                eq(500));
+        inOrder.verify(changeLogMapper).updateStatusByShard(
+                21L, 9L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW);
+        inOrder.verify(changeLogMapper).updateStatus(
+                22L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW);
+        inOrder.verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500);
+        assertThat(staleBeforeCaptor.getValue()).isBefore(startedAt);
     }
 
     @Test
@@ -268,9 +297,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
 
         assertThat(drained).isZero();
         verifyNoInteractions(seckillRepository, messageRepository, messagePublisher);
-        verify(changeLogMapper).resetStaleStatus(
+        verify(changeLogMapper).selectStaleIdsByStatus(
                 eq(SeckillStockChangeLogStatus.OUTBOXING),
-                eq(SeckillStockChangeLogStatus.NEW),
                 org.mockito.ArgumentMatchers.any(LocalDateTime.class),
                 eq(500));
         verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500);
@@ -288,9 +316,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         int drained = service.drainOnce();
 
         assertThat(drained).isZero();
-        verify(changeLogMapper).resetStaleStatus(
+        verify(changeLogMapper).selectStaleIdsByStatus(
                 eq(SeckillStockChangeLogStatus.OUTBOXING),
-                eq(SeckillStockChangeLogStatus.NEW),
                 org.mockito.ArgumentMatchers.any(LocalDateTime.class),
                 eq(1));
         verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1);
@@ -305,9 +332,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         int drained = service.drainOnce();
 
         assertThat(drained).isZero();
-        verify(changeLogMapper).resetStaleStatus(
+        verify(changeLogMapper).selectStaleIdsByStatus(
                 eq(SeckillStockChangeLogStatus.OUTBOXING),
-                eq(SeckillStockChangeLogStatus.NEW),
                 org.mockito.ArgumentMatchers.any(LocalDateTime.class),
                 eq(1000));
         verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1000);
@@ -337,6 +363,14 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         changeLog.setChangeType("DEDUCT");
         changeLog.setQuantityDelta(-2);
         changeLog.setStatus(SeckillStockChangeLogStatus.NEW);
+        return changeLog;
+    }
+
+    private SeckillStockChangeLogEntity staleChangeLog(Long id, Long bucketShardKey) {
+        SeckillStockChangeLogEntity changeLog = new SeckillStockChangeLogEntity();
+        changeLog.setId(id);
+        changeLog.setBucketShardKey(bucketShardKey);
+        changeLog.setStatus(SeckillStockChangeLogStatus.OUTBOXING);
         return changeLog;
     }
 
