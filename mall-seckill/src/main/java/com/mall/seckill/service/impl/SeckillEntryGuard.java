@@ -102,9 +102,7 @@ public class SeckillEntryGuard {
         long ttlSeconds = bufferSeconds;
         if (activityEndAt != null) {
             long secondsUntilEnd = Duration.between(Instant.now(), activityEndAt).getSeconds();
-            if (secondsUntilEnd > 0) {
-                ttlSeconds = secondsUntilEnd + bufferSeconds;
-            }
+            ttlSeconds = secondsUntilEnd + bufferSeconds;
         }
         return Math.max(1, ttlSeconds);
     }

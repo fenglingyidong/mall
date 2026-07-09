@@ -3,6 +3,7 @@ package com.mall.seckill.service.impl;
 import com.mall.common.exception.BusinessException;
 import com.mall.seckill.config.SeckillProperties;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
@@ -88,6 +89,20 @@ class SeckillEntryGuardTest {
 
         assertThat(decision.outcome()).isEqualTo(SeckillEntryGuard.BuyerOutcome.ACQUIRED);
         verify(bucket).trySet(eq("r1"), org.mockito.ArgumentMatchers.longThat(ttl -> ttl >= 600), eq(TimeUnit.SECONDS));
+    }
+
+    @Test
+    void shouldReduceBuyerTtlWhenActivityEndedWithinBuffer() {
+        RedissonClient redisson = mock(RedissonClient.class);
+        RBucket<String> bucket = bucket(redisson, "seckill:entry:buyer:1:1001:101");
+        when(bucket.trySet(eq("r1"), anyLong(), eq(TimeUnit.SECONDS))).thenReturn(true);
+        SeckillEntryGuard guard = new SeckillEntryGuard(provider(redisson), enabledProperties());
+        ArgumentCaptor<Long> ttlCaptor = ArgumentCaptor.forClass(Long.class);
+
+        guard.acquireBuyer(1L, 1001L, 101L, "r1", Instant.now().minusSeconds(10));
+
+        verify(bucket).trySet(eq("r1"), ttlCaptor.capture(), eq(TimeUnit.SECONDS));
+        assertThat(ttlCaptor.getValue()).isBetween(580L, 599L);
     }
 
     @Test
