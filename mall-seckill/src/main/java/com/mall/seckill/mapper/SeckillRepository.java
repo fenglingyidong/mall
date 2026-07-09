@@ -22,6 +22,8 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
@@ -42,6 +44,7 @@ public class SeckillRepository {
     private final SeckillSkuMapper skuMapper;
     private final SeckillResultMapper resultMapper;
     private final SeckillStockSnapshotMapper snapshotMapper;
+    private final SeckillStockChangeLogMapper changeLogMapper;
     private final SeckillBucketService bucketService;
     private final SeckillProperties properties;
     private final MeterRegistry meterRegistry;
@@ -66,7 +69,7 @@ public class SeckillRepository {
                               SeckillResultMapper resultMapper,
                               SeckillStockSnapshotMapper snapshotMapper,
                               MeterRegistry meterRegistry) {
-        this(activityMapper, skuMapper, resultMapper, snapshotMapper, (SeckillBucketService) null, new SeckillProperties(), meterRegistry);
+        this(activityMapper, skuMapper, resultMapper, snapshotMapper, null, (SeckillBucketService) null, new SeckillProperties(), meterRegistry);
     }
 
     @Autowired
@@ -74,6 +77,7 @@ public class SeckillRepository {
                              SeckillSkuMapper skuMapper,
                              SeckillResultMapper resultMapper,
                              SeckillStockSnapshotMapper snapshotMapper,
+                             SeckillStockChangeLogMapper changeLogMapper,
                              ObjectProvider<SeckillBucketService> bucketService,
                              SeckillProperties properties,
                              MeterRegistry meterRegistry) {
@@ -81,6 +85,7 @@ public class SeckillRepository {
                 skuMapper,
                 resultMapper,
                 snapshotMapper,
+                changeLogMapper,
                 bucketService.getIfAvailable(),
                 properties,
                 meterRegistry);
@@ -93,10 +98,22 @@ public class SeckillRepository {
                       SeckillBucketService bucketService,
                       SeckillProperties properties,
                       MeterRegistry meterRegistry) {
+        this(activityMapper, skuMapper, resultMapper, snapshotMapper, null, bucketService, properties, meterRegistry);
+    }
+
+    SeckillRepository(SeckillActivityMapper activityMapper,
+                      SeckillSkuMapper skuMapper,
+                      SeckillResultMapper resultMapper,
+                      SeckillStockSnapshotMapper snapshotMapper,
+                      SeckillStockChangeLogMapper changeLogMapper,
+                      SeckillBucketService bucketService,
+                      SeckillProperties properties,
+                      MeterRegistry meterRegistry) {
         this.activityMapper = activityMapper;
         this.skuMapper = skuMapper;
         this.resultMapper = resultMapper;
         this.snapshotMapper = snapshotMapper;
+        this.changeLogMapper = changeLogMapper;
         this.bucketService = bucketService;
         this.properties = properties;
         this.meterRegistry = meterRegistry;
@@ -293,11 +310,15 @@ public class SeckillRepository {
                                                           Long skuId,
                                                           SeckillBucketService.SelectedBucket selectedBucket,
                                                           int quantity) {
+        if (hasDeductFact(requestId)) {
+            return StockDeductionResult.duplicate();
+        }
         try {
             SeckillBucketService.BucketMutationResult bucketResult = recordDeductionStockUpdateTimer.record(() ->
                     bucketService.deductSelected(selectedBucket, requestId, activityId, skuId, quantity));
             return StockDeductionResult.success(bucketResult.stockVersion());
         } catch (DuplicateKeyException exception) {
+            markCurrentTransactionRollbackOnly();
             return StockDeductionResult.duplicate();
         }
     }
@@ -606,6 +627,16 @@ public class SeckillRepository {
 
     private boolean bucketModeEnabled() {
         return bucketService != null && properties.getBucket().isEnabled();
+    }
+
+    private boolean hasDeductFact(String requestId) {
+        return changeLogMapper != null && changeLogMapper.countByRequestIdAndChangeType(requestId, "DEDUCT") > 0;
+    }
+
+    private void markCurrentTransactionRollbackOnly() {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+        }
     }
 
     public boolean isBucketModeEnabled() {

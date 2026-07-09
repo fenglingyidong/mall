@@ -58,6 +58,9 @@ class SeckillRepositoryTest {
     private SeckillStockSnapshotMapper snapshotMapper;
 
     @Mock
+    private SeckillStockChangeLogMapper changeLogMapper;
+
+    @Mock
     private SeckillBucketService bucketService;
 
     private SeckillRepository repository;
@@ -271,6 +274,7 @@ class SeckillRepositoryTest {
         SeckillRepository bucketRepository = bucketRepository();
         StockVersion stockVersion = new StockVersion(48, 8L);
         SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(0L);
         when(bucketService.deductSelected(selectedBucket, "r1", 1L, 1001L, 1))
                 .thenReturn(new SeckillBucketService.BucketMutationResult(stockVersion, 1000L, selectedBucket));
 
@@ -278,6 +282,35 @@ class SeckillRepositoryTest {
 
         assertThat(result.code()).isZero();
         assertThat(result.stockVersion()).isEqualTo(stockVersion);
+        verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
+        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
+    }
+
+    @Test
+    void shouldSkipBucketDeductionWhenDeductFactAlreadyExists() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(1L);
+
+        StockDeductionResult result = bucketRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
+
+        assertThat(result.code()).isEqualTo(2);
+        verify(bucketService, never()).deductSelected(any(), any(), any(), any(), anyInt());
+        verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
+        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
+    }
+
+    @Test
+    void shouldReturnDuplicateWhenDeductFactDuplicateRacesAfterBucketDeduct() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        when(changeLogMapper.countByRequestIdAndChangeType("r1", "DEDUCT")).thenReturn(0L);
+        when(bucketService.deductSelected(selectedBucket, "r1", 1L, 1001L, 1))
+                .thenThrow(new DuplicateKeyException("duplicate deduct fact"));
+
+        StockDeductionResult result = bucketRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
+
+        assertThat(result.code()).isEqualTo(2);
         verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
         verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
     }
@@ -471,6 +504,7 @@ class SeckillRepositoryTest {
                 skuMapper,
                 resultMapper,
                 snapshotMapper,
+                changeLogMapper,
                 bucketService,
                 properties,
                 new SimpleMeterRegistry());
