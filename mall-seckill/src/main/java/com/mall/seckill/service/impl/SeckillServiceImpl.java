@@ -3,15 +3,12 @@ package com.mall.seckill.service.impl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mall.common.context.UserContext;
 import com.mall.common.exception.BusinessException;
-import com.mall.common.util.JsonUtils;
 import com.mall.message.ReliableMessagePublisher;
 import com.mall.seckill.cache.SeckillStockCache;
 import com.mall.seckill.config.SeckillProperties;
 import com.mall.seckill.mapper.ReservationGuardRepository;
 import com.mall.seckill.mapper.SeckillRepository;
 import com.mall.seckill.mapper.SeckillStockNotEnoughException;
-import com.mall.seckill.pojo.entity.SeckillReservationGuardEntity;
-import com.mall.seckill.pojo.dto.SeckillOrderRequest;
 import com.mall.seckill.pojo.entity.SeckillActivity;
 import com.mall.seckill.pojo.entity.SeckillSku;
 import com.mall.seckill.pojo.vo.SeckillActivityView;
@@ -25,15 +22,11 @@ import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.TransientDataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 
-import java.sql.SQLTransientException;
 import java.time.Instant;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
@@ -47,28 +40,19 @@ public class SeckillServiceImpl implements SeckillService {
     private static final int STOCK_NOT_ENOUGH = 1;
     private static final int DUPLICATE_PURCHASE = 2;
     private static final int SECKILL_QUANTITY = 1;
-    private static final int DEDUCTION_RETRY_ATTEMPTS = 3;
-    private static final long DEDUCTION_RETRY_BACKOFF_MILLIS = 10L;
 
     private final SeckillRepository repository;
     private final SeckillStockCache stockCache;
     private final SentinelSeckillGuard sentinelGuard;
     private final SeckillHotspotGuard hotspotGuard;
-    private final ReliableMessagePublisher messagePublisher;
-    private final ReservationGuardRepository guardRepository;
     private final SeckillEntryGuard entryGuard;
-    private final ObjectMapper objectMapper;
     private final RedissonClient redissonClient;
     private final SeckillProperties properties;
     private final MeterRegistry meterRegistry;
-    private final TransactionTemplate submitTransactionTemplate;
     private final Timer submitTotalTimer;
     private final Timer submitSentinelTimer;
     private final Timer submitMetadataTimer;
     private final Timer submitLockTimer;
-    private final Timer submitStockCacheSoldOutTimer;
-    private final Timer submitStockCacheRefreshTimer;
-    private final Timer submitMqPublishTimer;
     private final ConcurrentMap<Long, CacheEntry<SeckillActivity>> activityCache = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, CacheEntry<SeckillSku>> skuCache = new ConcurrentHashMap<>();
 
@@ -114,22 +98,14 @@ public class SeckillServiceImpl implements SeckillService {
         this.stockCache = stockCache;
         this.sentinelGuard = sentinelGuard;
         this.hotspotGuard = hotspotGuard;
-        this.messagePublisher = messagePublisher;
-        this.guardRepository = guardRepository.getIfAvailable();
         this.entryGuard = entryGuard;
-        this.objectMapper = objectMapper;
         this.redissonClient = redissonClient.getIfAvailable();
         this.properties = properties;
         this.meterRegistry = meterRegistry;
-        PlatformTransactionManager manager = transactionManager.getIfAvailable();
-        this.submitTransactionTemplate = manager == null ? null : new TransactionTemplate(manager);
         this.submitTotalTimer = timer("seckill.submit.total", "Official seckill submit total latency");
         this.submitSentinelTimer = timer("seckill.submit.sentinel", "Official seckill submit Sentinel guard latency");
         this.submitMetadataTimer = timer("seckill.submit.metadata", "Official seckill submit metadata load latency");
         this.submitLockTimer = timer("seckill.submit.lock", "Official seckill submit duplicate lock latency");
-        this.submitStockCacheSoldOutTimer = timer("seckill.submit.stock-cache.sold-out", "Official seckill submit stock-cache sold-out check latency");
-        this.submitStockCacheRefreshTimer = timer("seckill.submit.stock-cache.refresh", "Official seckill submit stock-cache refresh latency");
-        this.submitMqPublishTimer = timer("seckill.submit.mq.publish", "Official seckill submit MQ publish latency");
     }
 
     @Override
@@ -230,37 +206,10 @@ public class SeckillServiceImpl implements SeckillService {
                                            SeckillSku sku,
                                            Instant activityEndAt,
                                            String requestId) {
-        if (asyncEntryGuardEnabled()) {
-            return doSubmitWithAsyncEntry(requestId, activityId, skuId, userId, sku, activityEndAt);
+        if (!asyncEntryGuardEnabled()) {
+            throw new BusinessException(500, "Seckill async entry guard is not enabled");
         }
-        if (submitStockCacheSoldOutTimer.record(() -> stockCache.isSoldOut(activityId, skuId))) {
-            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
-        }
-        if (reservationGuardEnabled()) {
-            return doSubmitWithReservationGuard(requestId, activityId, skuId, userId, sku);
-        }
-        SeckillOrderRequest orderRequest = new SeckillOrderRequest(
-                requestId,
-                activityId,
-                userId,
-                skuId,
-                sku.skuName(),
-                sku.price(),
-                SECKILL_QUANTITY
-        );
-        StockDeductionResult deductionResult;
-        try {
-            deductionResult = recordDeductionAndEnqueueOrder(requestId, sku.id(), activityId, skuId, userId, orderRequest);
-        } catch (SeckillStockNotEnoughException exception) {
-            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
-        }
-        if (deductionResult.code() != DEDUCT_SUCCESS) {
-            return failedSubmit(requestId, deductionResult.code());
-        }
-        if (deductionResult.stockVersion() != null) {
-            submitStockCacheRefreshTimer.record(() -> stockCache.refresh(activityId, skuId, deductionResult.stockVersion()));
-        }
-        return new SeckillSubmitResponse(requestId, "ACCEPTED", "Accepted");
+        return doSubmitWithAsyncEntry(requestId, activityId, skuId, userId, sku, activityEndAt);
     }
 
     private SeckillSubmitResponse doSubmitWithAsyncEntry(String requestId,
@@ -333,188 +282,6 @@ public class SeckillServiceImpl implements SeckillService {
         return processingResponse(requestId);
     }
 
-    private SeckillSubmitResponse doSubmitWithReservationGuard(String requestId,
-                                                               Long activityId,
-                                                               Long skuId,
-                                                               Long userId,
-                                                               SeckillSku sku) {
-        ReservationGuardRepository.CreateGuardResult guardResult = guardRepository.createOrLoad(
-                requestId,
-                new ReservationGuardRepository.ReservationDraft(requestId, activityId, skuId, userId));
-        if (guardResult.outcome() == ReservationGuardRepository.GuardCreateOutcome.REQUEST_DUPLICATE) {
-            return responseFromExistingGuard(guardResult.guard());
-        }
-        if (guardResult.outcome() == ReservationGuardRepository.GuardCreateOutcome.ACTIVE_DUPLICATE) {
-            return responseFromActiveDuplicate(guardResult.guard());
-        }
-
-        SeckillBucketService.SelectedBucket selectedBucket;
-        try {
-            selectedBucket = repository.selectBucket(activityId, skuId);
-            if (!guardRepository.attachBucket(requestId, selectedBucket)) {
-                return responseFromExistingGuard(guardRepository.findByRequestId(requestId));
-            }
-        } catch (SeckillStockNotEnoughException exception) {
-            guardRepository.markFailedIfProcessing(requestId, "Stock not enough");
-            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
-        }
-
-        SeckillOrderRequest orderRequest = new SeckillOrderRequest(
-                requestId,
-                activityId,
-                userId,
-                skuId,
-                sku.skuName(),
-                sku.price(),
-                SECKILL_QUANTITY,
-                selectedBucket.bucketShardKey()
-        );
-
-        StockDeductionResult deductionResult;
-        try {
-            deductionResult = executeGuardedRecordDeductionAndEnqueueOrder(
-                    requestId,
-                    sku.id(),
-                    activityId,
-                    skuId,
-                    userId,
-                    selectedBucket,
-                    orderRequest);
-        } catch (SeckillStockNotEnoughException exception) {
-            guardRepository.markFailedIfProcessing(requestId, "Stock not enough");
-            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
-        } catch (RuntimeException exception) {
-            throw exception;
-        }
-
-        if (deductionResult.code() == DUPLICATE_PURCHASE) {
-            guardRepository.markFailedIfProcessing(requestId, "Duplicate purchase");
-            return failedSubmit(requestId, DUPLICATE_PURCHASE);
-        }
-        if (deductionResult.code() != DEDUCT_SUCCESS) {
-            guardRepository.markFailedIfProcessing(requestId, "Seckill failed");
-            return failedSubmit(requestId, deductionResult.code());
-        }
-        guardRepository.markDeducted(requestId);
-        if (deductionResult.stockVersion() != null) {
-            submitStockCacheRefreshTimer.record(() -> stockCache.refresh(activityId, skuId, deductionResult.stockVersion()));
-        }
-        return new SeckillSubmitResponse(requestId, "ACCEPTED", "Accepted");
-    }
-
-    private StockDeductionResult recordDeductionAndEnqueueOrder(String requestId,
-                                                                Long stockId,
-                                                                Long activityId,
-                                                                Long skuId,
-                                                                Long userId,
-                                                                SeckillOrderRequest orderRequest) {
-        RuntimeException lastException = null;
-        for (int attempt = 1; attempt <= DEDUCTION_RETRY_ATTEMPTS; attempt++) {
-            try {
-                return executeRecordDeductionAndEnqueueOrder(requestId, stockId, activityId, skuId, userId, orderRequest);
-            } catch (RuntimeException exception) {
-                if (!isRetryableDeductionException(exception) || attempt == DEDUCTION_RETRY_ATTEMPTS) {
-                    throw exception;
-                }
-                lastException = exception;
-                backoffBeforeDeductionRetry(attempt);
-            }
-        }
-        throw lastException;
-    }
-
-    private StockDeductionResult executeRecordDeductionAndEnqueueOrder(String requestId,
-                                                                       Long stockId,
-                                                                       Long activityId,
-                                                                       Long skuId,
-                                                                       Long userId,
-                                                                       SeckillOrderRequest orderRequest) {
-        if (submitTransactionTemplate == null) {
-            return doRecordDeductionAndEnqueueOrder(requestId, stockId, activityId, skuId, userId, orderRequest);
-        }
-        return submitTransactionTemplate.execute(status ->
-                doRecordDeductionAndEnqueueOrder(requestId, stockId, activityId, skuId, userId, orderRequest));
-    }
-
-    private StockDeductionResult executeGuardedRecordDeductionAndEnqueueOrder(String requestId,
-                                                                              Long stockId,
-                                                                              Long activityId,
-                                                                              Long skuId,
-                                                                              Long userId,
-                                                                              SeckillBucketService.SelectedBucket selectedBucket,
-                                                                              SeckillOrderRequest orderRequest) {
-        if (submitTransactionTemplate == null) {
-            return doRecordDeductionAndEnqueueOrder(requestId, stockId, activityId, skuId, userId, selectedBucket, orderRequest);
-        }
-        return submitTransactionTemplate.execute(status ->
-                doRecordDeductionAndEnqueueOrder(requestId, stockId, activityId, skuId, userId, selectedBucket, orderRequest));
-    }
-
-    private StockDeductionResult doRecordDeductionAndEnqueueOrder(String requestId,
-                                                                  Long stockId,
-                                                                  Long activityId,
-                                                                  Long skuId,
-                                                                  Long userId,
-                                                                  SeckillOrderRequest orderRequest) {
-        StockDeductionResult deductionResult = repository.recordDeduction(
-                requestId,
-                stockId,
-                activityId,
-                skuId,
-                userId,
-                SECKILL_QUANTITY,
-                bucketShardKey -> submitMqPublishTimer.record(() ->
-                        messagePublisher.enqueueSeckillOrderCreate(requestId,
-                        JsonUtils.toJson(objectMapper, orderRequest.withBucketShardKey(bucketShardKey)),
-                        bucketShardKey)));
-        return deductionResult;
-    }
-
-    private StockDeductionResult doRecordDeductionAndEnqueueOrder(String requestId,
-                                                                  Long stockId,
-                                                                  Long activityId,
-                                                                  Long skuId,
-                                                                  Long userId,
-                                                                  SeckillBucketService.SelectedBucket selectedBucket,
-                                                                  SeckillOrderRequest orderRequest) {
-        return repository.recordDeduction(
-                requestId,
-                stockId,
-                activityId,
-                skuId,
-                userId,
-                SECKILL_QUANTITY,
-                selectedBucket,
-                bucketShardKey -> submitMqPublishTimer.record(() ->
-                        messagePublisher.enqueueSeckillOrderCreate(requestId,
-                                JsonUtils.toJson(objectMapper, orderRequest.withBucketShardKey(bucketShardKey)),
-                                bucketShardKey)));
-    }
-
-    private boolean isRetryableDeductionException(Throwable exception) {
-        Throwable current = exception;
-        while (current != null) {
-            if (current instanceof TransientDataAccessException || current instanceof SQLTransientException) {
-                return true;
-            }
-            String message = current.getMessage();
-            if (message != null && message.toLowerCase(Locale.ROOT).contains("deadlock found when trying to get lock")) {
-                return true;
-            }
-            current = current.getCause();
-        }
-        return false;
-    }
-
-    private void backoffBeforeDeductionRetry(int attempt) {
-        try {
-            Thread.sleep(DEDUCTION_RETRY_BACKOFF_MILLIS * attempt);
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new BusinessException(429, "Seckill submit interrupted");
-        }
-    }
-
     private SeckillSubmitResponse doSubmitWithHotspotPermit(Long activityId,
                                                             Long skuId,
                                                             Long userId,
@@ -584,24 +351,6 @@ public class SeckillServiceImpl implements SeckillService {
             return UUID.randomUUID().toString();
         }
         return requestId.trim();
-    }
-
-    private SeckillSubmitResponse responseFromExistingGuard(SeckillReservationGuardEntity guard) {
-        SeckillResult result = repository.result(guard.getRequestId());
-        return new SeckillSubmitResponse(result.requestId(), result.status(), result.message());
-    }
-
-    private SeckillSubmitResponse responseFromActiveDuplicate(SeckillReservationGuardEntity guard) {
-        if (ReservationGuardRepository.STATUS_CONFIRMED.equals(guard.getStatus())) {
-            return new SeckillSubmitResponse(guard.getRequestId(), "FAILED", "Already purchased");
-        }
-        return new SeckillSubmitResponse(guard.getRequestId(), "FAILED", "Duplicate purchase");
-    }
-
-    private boolean reservationGuardEnabled() {
-        return guardRepository != null
-                && properties.getReservationGuard().isEnabled()
-                && repository.isBucketModeEnabled();
     }
 
     private boolean asyncEntryGuardEnabled() {
