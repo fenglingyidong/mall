@@ -397,7 +397,10 @@ class SeckillServiceImplTest {
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
         verify(repository, never()).recordBucketDeductionFact(anyString(), anyLong(), anyLong(), any(), eq(1));
         verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString(), anyLong());
-        verify(repository, never()).saveResult(any());
+        ArgumentCaptor<SeckillResult> resultCaptor = ArgumentCaptor.forClass(SeckillResult.class);
+        verify(repository).saveResult(resultCaptor.capture());
+        assertThat(resultCaptor.getValue()).isEqualTo(
+                new SeckillResult("client-r1", "FAILED", null, "Duplicate purchase"));
     }
 
     @Test
@@ -430,7 +433,41 @@ class SeckillServiceImplTest {
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
         verify(repository).markRegisteredSnapshotFailed("client-r1", "Stock not enough");
         verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString(), anyLong());
-        verify(repository, never()).saveResult(any());
+        ArgumentCaptor<SeckillResult> resultCaptor = ArgumentCaptor.forClass(SeckillResult.class);
+        verify(repository).saveResult(resultCaptor.capture());
+        assertThat(resultCaptor.getValue()).isEqualTo(
+                new SeckillResult("client-r1", "FAILED", null, "Stock not enough"));
+    }
+
+    @Test
+    void asyncEntrySubmitShouldReturnPersistedFailureWhenFailedRequestIsRetried() {
+        SeckillServiceImpl service = newAsyncEntryService();
+        SeckillActivity activity = new SeckillActivity(1L, "flash", Instant.now().minusSeconds(60), Instant.now().plusSeconds(60));
+        SeckillSku sku = new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50);
+        SeckillResult failedResult = new SeckillResult("client-r1", "FAILED", null, "Duplicate purchase");
+        when(repository.requireActivity(1L)).thenReturn(activity);
+        when(repository.requireSku(1L, 1001L)).thenReturn(sku);
+        when(repository.isBucketModeEnabled()).thenReturn(true);
+        when(entryGuard.enabled()).thenReturn(true);
+        when(entryGuard.acquireRequest("client-r1"))
+                .thenReturn(new SeckillEntryGuard.RequestDecision(SeckillEntryGuard.RequestOutcome.ACQUIRED))
+                .thenReturn(new SeckillEntryGuard.RequestDecision(SeckillEntryGuard.RequestOutcome.DUPLICATE));
+        when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
+                .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.DUPLICATE_BUYER, "other-r1"));
+        when(repository.result("client-r1")).thenReturn(failedResult);
+
+        UserContext.set(new UserInfo(101L, "u101"));
+        SeckillSubmitResponse first = service.submit(1L, 1001L, "client-r1");
+        SeckillSubmitResponse second = service.submit(1L, 1001L, "client-r1");
+
+        assertThat(first.status()).isEqualTo("FAILED");
+        assertThat(first.message()).isEqualTo("Duplicate purchase");
+        assertThat(second.status()).isEqualTo("FAILED");
+        assertThat(second.message()).isEqualTo("Duplicate purchase");
+        verify(repository).saveResult(failedResult);
+        verify(repository).result("client-r1");
+        verify(repository, never()).selectBucket(anyLong(), anyLong());
+        verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString(), anyLong());
     }
 
     @Test

@@ -280,7 +280,7 @@ public class SeckillServiceImpl implements SeckillService {
             return responseFromExistingResultOrProcessing(requestId);
         }
         if (buyerDecision.outcome() == SeckillEntryGuard.BuyerOutcome.DUPLICATE_BUYER) {
-            return duplicatePurchaseResponse(requestId);
+            return failedSubmit(requestId, DUPLICATE_PURCHASE);
         }
 
         SeckillBucketService.SelectedBucket selectedBucket;
@@ -288,7 +288,7 @@ public class SeckillServiceImpl implements SeckillService {
             selectedBucket = repository.selectBucket(activityId, skuId);
         } catch (SeckillStockNotEnoughException exception) {
             entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
-            return stockNotEnoughResponse(requestId);
+            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
         }
 
         SeckillRepository.SnapshotRegistration snapshotRegistration = repository.registerBucketSnapshot(
@@ -304,7 +304,7 @@ public class SeckillServiceImpl implements SeckillService {
         }
         if (snapshotRegistration.outcome() == SeckillRepository.SnapshotRegistrationOutcome.ACTIVE_DUPLICATE) {
             entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
-            return duplicatePurchaseResponse(requestId);
+            return failedSubmit(requestId, DUPLICATE_PURCHASE);
         }
 
         StockDeductionResult deductionResult;
@@ -318,17 +318,17 @@ public class SeckillServiceImpl implements SeckillService {
         } catch (SeckillStockNotEnoughException exception) {
             entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
             repository.markRegisteredSnapshotFailed(requestId, "Stock not enough");
-            return stockNotEnoughResponse(requestId);
+            return failedSubmit(requestId, STOCK_NOT_ENOUGH);
         }
         if (deductionResult.code() == DUPLICATE_PURCHASE) {
             entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
             repository.markRegisteredSnapshotFailed(requestId, "Duplicate purchase");
-            return duplicatePurchaseResponse(requestId);
+            return failedSubmit(requestId, DUPLICATE_PURCHASE);
         }
         if (deductionResult.code() != DEDUCT_SUCCESS) {
             entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
             repository.markRegisteredSnapshotFailed(requestId, "Seckill failed");
-            return seckillFailedResponse(requestId);
+            return failedSubmit(requestId, deductionResult.code());
         }
         return processingResponse(requestId);
     }
@@ -577,18 +577,6 @@ public class SeckillServiceImpl implements SeckillService {
 
     private SeckillSubmitResponse processingResponse(String requestId) {
         return new SeckillSubmitResponse(requestId, "PROCESSING", "Processing");
-    }
-
-    private SeckillSubmitResponse stockNotEnoughResponse(String requestId) {
-        return new SeckillSubmitResponse(requestId, "FAILED", "Stock not enough");
-    }
-
-    private SeckillSubmitResponse duplicatePurchaseResponse(String requestId) {
-        return new SeckillSubmitResponse(requestId, "FAILED", "Duplicate purchase");
-    }
-
-    private SeckillSubmitResponse seckillFailedResponse(String requestId) {
-        return new SeckillSubmitResponse(requestId, "FAILED", "Seckill failed");
     }
 
     private String normalizeRequestId(String requestId) {
