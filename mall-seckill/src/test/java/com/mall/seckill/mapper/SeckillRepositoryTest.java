@@ -33,6 +33,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.inOrder;
@@ -212,6 +213,80 @@ class SeckillRepositoryTest {
         assertThat(updated.getBucketShardKey()).isEqualTo(4L);
         assertThat(updated.getStrategyVersion()).isEqualTo(7L);
         assertThat(updated.getChangeId()).isEqualTo(1000L);
+    }
+
+    @Test
+    void shouldRegisterBucketSnapshotAsRegisteredWithoutDeductingOrSavingResult() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+
+        SeckillRepository.SnapshotRegistration registration = bucketRepository.registerBucketSnapshot(
+                "r1", 10L, 1L, 1001L, 101L, 1, selectedBucket);
+
+        assertThat(registration.outcome()).isEqualTo(SeckillRepository.SnapshotRegistrationOutcome.CREATED);
+        ArgumentCaptor<SeckillStockSnapshotEntity> snapshotCaptor = ArgumentCaptor.forClass(SeckillStockSnapshotEntity.class);
+        verify(snapshotMapper).insert(snapshotCaptor.capture());
+        SeckillStockSnapshotEntity snapshot = snapshotCaptor.getValue();
+        assertThat(snapshot.getRequestId()).isEqualTo("r1");
+        assertThat(snapshot.getActiveKey()).isEqualTo(101L);
+        assertThat(snapshot.getBucketId()).isEqualTo(99L);
+        assertThat(snapshot.getBucketShardKey()).isEqualTo(3L);
+        assertThat(snapshot.getStatus()).isEqualTo("REGISTERED");
+        verify(bucketService, never()).deduct(any(), any(), any(), any(), anyInt());
+        verify(bucketService, never()).deductSelected(any(), any(), any(), any(), anyInt());
+        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
+    }
+
+    @Test
+    void shouldReportRequestDuplicateWhenSnapshotRequestAlreadyExists() {
+        SeckillRepository bucketRepository = bucketRepository();
+        SeckillStockSnapshotEntity existing = snapshot("r1", "REGISTERED", 1);
+        when(snapshotMapper.selectById("r1")).thenReturn(existing);
+
+        SeckillRepository.SnapshotRegistration registration = bucketRepository.registerBucketSnapshot(
+                "r1", 10L, 1L, 1001L, 101L, 1, new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L));
+
+        assertThat(registration.outcome()).isEqualTo(SeckillRepository.SnapshotRegistrationOutcome.REQUEST_DUPLICATE);
+        assertThat(registration.snapshot()).isNotNull();
+        verify(snapshotMapper, never()).insert(any(SeckillStockSnapshotEntity.class));
+    }
+
+    @Test
+    void shouldReportActiveDuplicateWhenSnapshotActiveKeyRejectsInsert() {
+        SeckillRepository bucketRepository = bucketRepository();
+        when(snapshotMapper.selectById("r2")).thenReturn(null);
+        when(snapshotMapper.insert(any(SeckillStockSnapshotEntity.class)))
+                .thenThrow(new DuplicateKeyException("duplicate active user"));
+
+        SeckillRepository.SnapshotRegistration registration = bucketRepository.registerBucketSnapshot(
+                "r2", 10L, 1L, 1001L, 101L, 1, new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L));
+
+        assertThat(registration.outcome()).isEqualTo(SeckillRepository.SnapshotRegistrationOutcome.ACTIVE_DUPLICATE);
+        assertThat(registration.snapshot()).isNull();
+        verify(snapshotMapper).insert(any(SeckillStockSnapshotEntity.class));
+    }
+
+    @Test
+    void shouldRecordBucketDeductionFactWithoutUpdatingSnapshotOrSavingResult() {
+        SeckillRepository bucketRepository = bucketRepository();
+        StockVersion stockVersion = new StockVersion(48, 8L);
+        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        when(bucketService.deductSelected(selectedBucket, "r1", 1L, 1001L, 1))
+                .thenReturn(new SeckillBucketService.BucketMutationResult(stockVersion, 1000L, selectedBucket));
+
+        StockDeductionResult result = bucketRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
+
+        assertThat(result.code()).isZero();
+        assertThat(result.stockVersion()).isEqualTo(stockVersion);
+        verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
+        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
+    }
+
+    @Test
+    void shouldMarkRegisteredSnapshotFailedAndReleaseActiveKey() {
+        repository.markRegisteredSnapshotFailed("r1", "failed");
+
+        verify(snapshotMapper).releaseActiveKeyIfRegistered("r1", "failed");
     }
 
     @Test

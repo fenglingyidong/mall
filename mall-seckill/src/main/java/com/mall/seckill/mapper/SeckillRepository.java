@@ -245,6 +245,67 @@ public class SeckillRepository {
         return bucketService.selectBucket(activityId, skuId);
     }
 
+    @Transactional(rollbackFor = Exception.class)
+    public SnapshotRegistration registerBucketSnapshot(String requestId,
+                                                       Long stockId,
+                                                       Long activityId,
+                                                       Long skuId,
+                                                       Long userId,
+                                                       int quantity,
+                                                       SeckillBucketService.SelectedBucket selectedBucket) {
+        SeckillStockSnapshotEntity existing = snapshotMapper.selectById(requestId);
+        if (existing != null) {
+            return new SnapshotRegistration(SnapshotRegistrationOutcome.REQUEST_DUPLICATE, toStockSnapshot(existing));
+        }
+
+        SeckillStockSnapshotEntity snapshot = new SeckillStockSnapshotEntity();
+        snapshot.setRequestId(requestId);
+        snapshot.setStockId(stockId);
+        snapshot.setBucketId(selectedBucket.bucketId());
+        snapshot.setBucketNo(selectedBucket.bucketNo());
+        snapshot.setBucketShardKey(selectedBucket.bucketShardKey());
+        snapshot.setStrategyVersion(selectedBucket.strategyVersion());
+        snapshot.setActivityId(activityId);
+        snapshot.setSkuId(skuId);
+        snapshot.setUserId(userId);
+        snapshot.setActiveKey(userId);
+        snapshot.setQuantity(quantity);
+        snapshot.setStatus("REGISTERED");
+        snapshot.setMessage("Registered");
+        LocalDateTime now = LocalDateTime.now();
+        snapshot.setCreatedAt(now);
+        snapshot.setUpdatedAt(now);
+        try {
+            recordDeductionSnapshotInsertTimer.record(() -> snapshotMapper.insert(snapshot));
+            return new SnapshotRegistration(SnapshotRegistrationOutcome.CREATED, toStockSnapshot(snapshot));
+        } catch (DuplicateKeyException exception) {
+            SeckillStockSnapshotEntity duplicate = snapshotMapper.selectById(requestId);
+            if (duplicate != null) {
+                return new SnapshotRegistration(SnapshotRegistrationOutcome.REQUEST_DUPLICATE, toStockSnapshot(duplicate));
+            }
+            return new SnapshotRegistration(SnapshotRegistrationOutcome.ACTIVE_DUPLICATE, null);
+        }
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public StockDeductionResult recordBucketDeductionFact(String requestId,
+                                                          Long activityId,
+                                                          Long skuId,
+                                                          SeckillBucketService.SelectedBucket selectedBucket,
+                                                          int quantity) {
+        try {
+            SeckillBucketService.BucketMutationResult bucketResult = recordDeductionStockUpdateTimer.record(() ->
+                    bucketService.deductSelected(selectedBucket, requestId, activityId, skuId, quantity));
+            return StockDeductionResult.success(bucketResult.stockVersion());
+        } catch (DuplicateKeyException exception) {
+            return StockDeductionResult.duplicate();
+        }
+    }
+
+    public void markRegisteredSnapshotFailed(String requestId, String message) {
+        snapshotMapper.releaseActiveKeyIfRegistered(requestId, truncate(message, MESSAGE_MAX_LENGTH));
+    }
+
     private StockDeductionResult recordBucketDeduction(String requestId,
                                                        Long stockId,
                                                        Long activityId,
@@ -568,5 +629,14 @@ public class SeckillRepository {
                                 Long userId,
                                 Integer quantity,
                                 String status) {
+    }
+
+    public record SnapshotRegistration(SnapshotRegistrationOutcome outcome, StockSnapshot snapshot) {
+    }
+
+    public enum SnapshotRegistrationOutcome {
+        CREATED,
+        REQUEST_DUPLICATE,
+        ACTIVE_DUPLICATE
     }
 }

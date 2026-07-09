@@ -25,6 +25,10 @@ public interface SeckillStockChangeLogMapper extends BaseMapper<SeckillStockChan
     long countByRequestIdAndBucketShardKey(@Param("requestId") String requestId,
                                            @Param("bucketShardKey") Long bucketShardKey);
 
+    @Select("SELECT COUNT(1) FROM seckill_stock_change_log WHERE request_id = #{requestId} AND change_type = #{changeType}")
+    long countByRequestIdAndChangeType(@Param("requestId") String requestId,
+                                       @Param("changeType") String changeType);
+
     @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = NOW() WHERE id = #{id} AND status = #{expectedStatus}")
     int updateStatus(@Param("id") Long id,
                      @Param("expectedStatus") String expectedStatus,
