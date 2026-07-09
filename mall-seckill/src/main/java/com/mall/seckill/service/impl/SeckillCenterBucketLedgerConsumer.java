@@ -36,24 +36,31 @@ public class SeckillCenterBucketLedgerConsumer {
 
     @Scheduled(fixedDelayString = "${mall.seckill.bucket.center-ledger.fixed-delay:1000}")
     public void consume() {
-        String sourceStatus = sourceStatus();
+        List<String> sourceStatuses = sourceStatuses();
+        int batchSize = batchSize();
         List<Long> bucketShardKeys = properties.getBucket().getRouting().getBucketShardKeys();
         if (bucketShardKeys == null || bucketShardKeys.isEmpty()) {
-            consume(changeLogMapper.selectByStatusForConsume(sourceStatus, batchSize()));
+            for (String sourceStatus : sourceStatuses) {
+                consume(changeLogMapper.selectByStatusForConsume(sourceStatus, batchSize));
+            }
             return;
         }
-        for (Long bucketShardKey : bucketShardKeys) {
-            consume(changeLogMapper.selectByStatusForConsumeByShard(
-                    bucketShardKey,
-                    sourceStatus,
-                    batchSize()));
+        for (String sourceStatus : sourceStatuses) {
+            for (Long bucketShardKey : bucketShardKeys) {
+                consume(changeLogMapper.selectByStatusForConsumeByShard(
+                        bucketShardKey,
+                        sourceStatus,
+                        batchSize));
+            }
         }
     }
 
-    private String sourceStatus() {
-        return properties.getOrderOutbox().isEnabled()
-                ? SeckillStockChangeLogStatus.OUTBOXED
-                : SeckillStockChangeLogStatus.NEW;
+    private List<String> sourceStatuses() {
+        if (properties.getOrderOutbox().isEnabled()) {
+            return List.of(SeckillStockChangeLogStatus.OUTBOXED);
+        }
+        // Rollback fallback: drain logs already outboxed before legacy NEW logs.
+        return List.of(SeckillStockChangeLogStatus.OUTBOXED, SeckillStockChangeLogStatus.NEW);
     }
 
     private void consume(List<SeckillStockChangeLogEntity> changeLogs) {

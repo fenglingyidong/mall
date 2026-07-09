@@ -6,12 +6,15 @@ import com.mall.seckill.pojo.entity.SeckillStockChangeLogEntity;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -35,15 +38,22 @@ class SeckillCenterBucketLedgerConsumerTest {
     }
 
     @Test
-    void shouldConsumeNewChangeLogsWithConfiguredBatchSize() {
-        SeckillStockChangeLogEntity first = changeLog(1L, 1001L);
-        SeckillStockChangeLogEntity second = changeLog(2L, 1001L);
+    void shouldDrainOutboxedThenNewChangeLogsWhenOrderOutboxDisabled() {
+        SeckillStockChangeLogEntity outboxed = changeLog(1L, 1001L);
+        SeckillStockChangeLogEntity fresh = changeLog(2L, 1001L);
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.OUTBOXED, 2))
+                .thenReturn(List.of(outboxed));
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 2))
-                .thenReturn(List.of(first, second));
+                .thenReturn(List.of(fresh));
 
         consumer.consume();
 
-        verify(applier).apply(List.of(first, second));
+        InOrder order = inOrder(changeLogMapper, applier);
+        order.verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.OUTBOXED, 2);
+        order.verify(applier).apply(List.of(outboxed));
+        order.verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 2);
+        order.verify(applier).apply(List.of(fresh));
+        verify(changeLogMapper, never()).selectByStatusForConsume(SeckillStockChangeLogStatus.OUTBOXING, 2);
     }
 
     @Test
@@ -59,15 +69,26 @@ class SeckillCenterBucketLedgerConsumerTest {
     }
 
     @Test
-    void shouldConsumeNewChangeLogsByShardWhenOrderOutboxDisabled() {
+    void shouldDrainOutboxedThenNewChangeLogsByShardWhenOrderOutboxDisabled() {
         properties.getBucket().getRouting().setBucketShardKeys(List.of(3L));
-        SeckillStockChangeLogEntity changeLog = changeLog(1L, 1001L);
+        SeckillStockChangeLogEntity outboxed = changeLog(1L, 1001L);
+        SeckillStockChangeLogEntity fresh = changeLog(2L, 1001L);
+        when(changeLogMapper.selectByStatusForConsumeByShard(3L, SeckillStockChangeLogStatus.OUTBOXED, 2))
+                .thenReturn(List.of(outboxed));
         when(changeLogMapper.selectByStatusForConsumeByShard(3L, SeckillStockChangeLogStatus.NEW, 2))
-                .thenReturn(List.of(changeLog));
+                .thenReturn(List.of(fresh));
 
         consumer.consume();
 
-        verify(applier).apply(List.of(changeLog));
+        InOrder order = inOrder(changeLogMapper, applier);
+        order.verify(changeLogMapper).selectByStatusForConsumeByShard(3L, SeckillStockChangeLogStatus.OUTBOXED, 2);
+        order.verify(applier).apply(List.of(outboxed));
+        order.verify(changeLogMapper).selectByStatusForConsumeByShard(3L, SeckillStockChangeLogStatus.NEW, 2);
+        order.verify(applier).apply(List.of(fresh));
+        verify(changeLogMapper, never()).selectByStatusForConsumeByShard(
+                3L,
+                SeckillStockChangeLogStatus.OUTBOXING,
+                2);
     }
 
     @Test
@@ -91,6 +112,8 @@ class SeckillCenterBucketLedgerConsumerTest {
     void shouldContinueWhenOneLedgerGroupFails() {
         SeckillStockChangeLogEntity first = changeLog(1L, 1001L);
         SeckillStockChangeLogEntity second = changeLog(2L, 1002L);
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.OUTBOXED, 2))
+                .thenReturn(List.of());
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 2))
                 .thenReturn(List.of(first, second));
         doThrow(new IllegalStateException("apply failed"))
@@ -105,11 +128,14 @@ class SeckillCenterBucketLedgerConsumerTest {
     @Test
     void shouldClampBatchSizeToPositiveValue() {
         properties.getBucket().getCenterLedger().setBatchSize(0);
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.OUTBOXED, 1))
+                .thenReturn(List.of());
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1))
                 .thenReturn(List.of());
 
         consumer.consume();
 
+        verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.OUTBOXED, 1);
         verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 1);
     }
 
