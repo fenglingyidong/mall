@@ -30,6 +30,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
@@ -77,8 +78,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         SeckillStockChangeLogEntity changeLog = deductChangeLog();
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(changeLog));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+        when(changeLogMapper.claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
                 .thenReturn(1);
         when(messageRepository.existsByBusinessKeyAndRoutingKey(
                 "req-1", MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY, 7L))
@@ -87,8 +88,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
                 .thenReturn(new SeckillRepository.StockSnapshot("req-1", 1L, 1001L, 2001L, 2, "DEDUCTED"));
         when(seckillRepository.requireSku(1L, 1001L))
                 .thenReturn(new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
+        when(changeLogMapper.updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
                 .thenReturn(1);
         LocalDateTime startedAt = LocalDateTime.now();
 
@@ -116,8 +117,12 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         assertThat(payload.get("price").decimalValue()).isEqualByComparingTo(BigDecimal.valueOf(99));
         assertThat(payload.get("quantity").asInt()).isEqualTo(2);
         assertThat(payload.get("bucketShardKey").asLong()).isEqualTo(7L);
-        verify(changeLogMapper).updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+        ArgumentCaptor<LocalDateTime> claimedAtCaptor = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(changeLogMapper).claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), claimedAtCaptor.capture());
+        assertThat(claimedAtCaptor.getValue().getNano()).isZero();
+        verify(changeLogMapper).updateStatusByShardIfClaimed(
+                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED, claimedAtCaptor.getValue());
     }
 
     @Test
@@ -142,12 +147,38 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
                 eq(SeckillStockChangeLogStatus.OUTBOXING),
                 staleBeforeCaptor.capture(),
                 eq(500));
-        inOrder.verify(changeLogMapper).updateStatusByShard(
-                21L, 9L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW);
-        inOrder.verify(changeLogMapper).updateStatus(
-                22L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW);
+        inOrder.verify(changeLogMapper).resetStaleStatusByShard(
+                21L, 9L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW, staleBeforeCaptor.getValue());
+        inOrder.verify(changeLogMapper).resetStaleStatus(
+                22L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW, staleBeforeCaptor.getValue());
         inOrder.verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500);
         assertThat(staleBeforeCaptor.getValue()).isBefore(startedAt);
+    }
+
+    @Test
+    void shouldClaimAndOutboxLegacyChangeLogWithClaimTimestamp() {
+        SeckillStockChangeLogEntity changeLog = deductChangeLog(13L, "req-legacy", null);
+        changeLog.setChangeType("RELEASE");
+        when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
+                .thenReturn(List.of(changeLog));
+        when(changeLogMapper.claimStatus(
+                eq(13L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
+                .thenReturn(1);
+        when(changeLogMapper.updateStatusIfClaimed(
+                eq(13L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
+                .thenReturn(1);
+
+        int drained = service.drainOnce();
+
+        assertThat(drained).isEqualTo(1);
+        ArgumentCaptor<LocalDateTime> claimedAtCaptor = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(changeLogMapper).claimStatus(
+                eq(13L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), claimedAtCaptor.capture());
+        assertThat(claimedAtCaptor.getValue().getNano()).isZero();
+        verify(changeLogMapper).updateStatusIfClaimed(
+                13L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED, claimedAtCaptor.getValue());
+        verify(changeLogMapper, never()).claimStatusByShard(
+                eq(13L), any(), anyString(), anyString(), any(LocalDateTime.class));
     }
 
     @Test
@@ -155,14 +186,14 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         SeckillStockChangeLogEntity changeLog = deductChangeLog();
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(changeLog));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+        when(changeLogMapper.claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
                 .thenReturn(1);
         when(messageRepository.existsByBusinessKeyAndRoutingKey(
                 "req-1", MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY, 7L))
                 .thenReturn(true);
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
+        when(changeLogMapper.updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
                 .thenReturn(1);
 
         int drained = service.drainOnce();
@@ -178,11 +209,11 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         changeLog.setChangeType("RELEASE");
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(changeLog));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+        when(changeLogMapper.claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
                 .thenReturn(1);
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
+        when(changeLogMapper.updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
                 .thenReturn(1);
 
         int drained = service.drainOnce();
@@ -197,8 +228,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         SeckillStockChangeLogEntity changeLog = deductChangeLog();
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(changeLog));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+        when(changeLogMapper.claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
                 .thenReturn(1);
         when(messageRepository.existsByBusinessKeyAndRoutingKey(
                 "req-1", MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY, 7L))
@@ -208,8 +239,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
 
         assertThatCode(() -> assertThat(service.drainOnce()).isZero())
                 .doesNotThrowAnyException();
-        verify(changeLogMapper).updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
+        verify(changeLogMapper).updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOX_FAILED), any(LocalDateTime.class));
         verify(messagePublisher, never()).enqueueSeckillOrderCreate(anyString(), anyString(), eq(7L));
     }
 
@@ -218,8 +249,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         SeckillStockChangeLogEntity changeLog = deductChangeLog();
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(changeLog));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+        when(changeLogMapper.claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
                 .thenReturn(1);
         when(messageRepository.existsByBusinessKeyAndRoutingKey(
                 "req-1", MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY, 7L))
@@ -228,8 +259,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
                 .thenReturn(new SeckillRepository.StockSnapshot("req-1", 1L, 1001L, 2001L, 2, "DEDUCTED"));
         when(seckillRepository.requireSku(1L, 1001L))
                 .thenReturn(new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
+        when(changeLogMapper.updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
                 .thenReturn(0);
 
         assertThatCode(() -> assertThat(service.drainOnce()).isZero())
@@ -238,7 +269,9 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         assertThat(transactionManager.committed()).isZero();
         assertThat(transactionManager.rolledBack()).isEqualTo(1);
         verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-1"), anyString(), eq(7L));
-        verify(changeLogMapper).updateStatusByShard(
+        verify(changeLogMapper).updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOX_FAILED), any(LocalDateTime.class));
+        verify(changeLogMapper, never()).updateStatusByShard(
                 11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
     }
 
@@ -248,11 +281,11 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         SeckillStockChangeLogEntity second = deductChangeLog(12L, "req-2", 8L);
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(first, second));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+        when(changeLogMapper.claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
                 .thenReturn(1);
-        when(changeLogMapper.updateStatusByShard(
-                12L, 8L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+        when(changeLogMapper.claimStatusByShard(
+                eq(12L), eq(8L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
                 .thenReturn(1);
         when(messageRepository.existsByBusinessKeyAndRoutingKey(
                 "req-1", MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY, 7L))
@@ -266,20 +299,20 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
                 .thenReturn(new SeckillRepository.StockSnapshot("req-2", 1L, 1001L, 2002L, 1, "DEDUCTED"));
         when(seckillRepository.requireSku(1L, 1001L))
                 .thenReturn(new SeckillSku(10L, 1L, 1001L, "phone", BigDecimal.valueOf(99), 50));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
+        when(changeLogMapper.updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
                 .thenThrow(new IllegalStateException("outboxed update failed"));
-        when(changeLogMapper.updateStatusByShard(
-                12L, 8L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED))
+        when(changeLogMapper.updateStatusByShardIfClaimed(
+                eq(12L), eq(8L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class)))
                 .thenReturn(1);
 
         int drained = service.drainOnce();
 
         assertThat(drained).isEqualTo(1);
-        verify(changeLogMapper).updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
-        verify(changeLogMapper).updateStatusByShard(
-                12L, 8L, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+        verify(changeLogMapper).updateStatusByShardIfClaimed(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOX_FAILED), any(LocalDateTime.class));
+        verify(changeLogMapper).updateStatusByShardIfClaimed(
+                eq(12L), eq(8L), eq(SeckillStockChangeLogStatus.OUTBOXING), eq(SeckillStockChangeLogStatus.OUTBOXED), any(LocalDateTime.class));
         verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-1"), anyString(), eq(7L));
         verify(messagePublisher).enqueueSeckillOrderCreate(eq("req-2"), anyString(), eq(8L));
     }
@@ -289,8 +322,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
         SeckillStockChangeLogEntity changeLog = deductChangeLog();
         when(changeLogMapper.selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500))
                 .thenReturn(List.of(changeLog));
-        when(changeLogMapper.updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING))
+        when(changeLogMapper.claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class)))
                 .thenReturn(0);
 
         int drained = service.drainOnce();
@@ -302,8 +335,8 @@ class SeckillOrderOutboxFromChangeLogServiceTest {
                 org.mockito.ArgumentMatchers.any(LocalDateTime.class),
                 eq(500));
         verify(changeLogMapper).selectByStatusForConsume(SeckillStockChangeLogStatus.NEW, 500);
-        verify(changeLogMapper).updateStatusByShard(
-                11L, 7L, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING);
+        verify(changeLogMapper).claimStatusByShard(
+                eq(11L), eq(7L), eq(SeckillStockChangeLogStatus.NEW), eq(SeckillStockChangeLogStatus.OUTBOXING), any(LocalDateTime.class));
         verifyNoMoreInteractions(changeLogMapper);
     }
 

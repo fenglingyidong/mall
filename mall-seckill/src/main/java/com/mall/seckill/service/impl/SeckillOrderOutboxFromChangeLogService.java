@@ -73,41 +73,65 @@ public class SeckillOrderOutboxFromChangeLogService {
     }
 
     private void resetStaleOutboxing(int batchSize) {
+        LocalDateTime before = LocalDateTime.now().minusSeconds(OUTBOXING_STALE_SECONDS);
         List<SeckillStockChangeLogEntity> staleChangeLogs = changeLogMapper.selectStaleIdsByStatus(
                 SeckillStockChangeLogStatus.OUTBOXING,
-                LocalDateTime.now().minusSeconds(OUTBOXING_STALE_SECONDS),
+                before,
                 batchSize);
         if (staleChangeLogs == null) {
             return;
         }
         for (SeckillStockChangeLogEntity changeLog : staleChangeLogs) {
-            updateStatus(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.NEW);
+            resetStaleStatus(changeLog, before);
         }
     }
 
     private boolean drainOne(SeckillStockChangeLogEntity changeLog) {
-        if (!updateStatus(changeLog, SeckillStockChangeLogStatus.NEW, SeckillStockChangeLogStatus.OUTBOXING)) {
+        ClaimedChangeLog claimed = claim(changeLog);
+        if (claimed == null) {
             return false;
         }
         try {
-            return Boolean.TRUE.equals(transactionTemplate.execute(status -> processClaimed(changeLog)));
+            return Boolean.TRUE.equals(transactionTemplate.execute(status -> processClaimed(claimed)));
         } catch (RuntimeException exception) {
             log.warn("Failed to build seckill order outbox from change log, changeLogId={}, requestId={}",
                     changeLog.getId(), changeLog.getRequestId(), exception);
-            markFailed(changeLog);
+            markFailed(claimed);
             return false;
         }
     }
 
-    private boolean processClaimed(SeckillStockChangeLogEntity changeLog) {
-        if (!CHANGE_TYPE_DEDUCT.equals(changeLog.getChangeType())) {
-            updateStatusOrThrow(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
-            return true;
+    private ClaimedChangeLog claim(SeckillStockChangeLogEntity changeLog) {
+        LocalDateTime claimedAt = LocalDateTime.now().withNano(0);
+        int updated;
+        if (changeLog.getBucketShardKey() != null) {
+            updated = changeLogMapper.claimStatusByShard(
+                    changeLog.getId(),
+                    changeLog.getBucketShardKey(),
+                    SeckillStockChangeLogStatus.NEW,
+                    SeckillStockChangeLogStatus.OUTBOXING,
+                    claimedAt);
+        } else {
+            updated = changeLogMapper.claimStatus(
+                    changeLog.getId(),
+                    SeckillStockChangeLogStatus.NEW,
+                    SeckillStockChangeLogStatus.OUTBOXING,
+                    claimedAt);
         }
-        return processDeduct(changeLog);
+        return updated > 0 ? new ClaimedChangeLog(changeLog, claimedAt) : null;
     }
 
-    private boolean processDeduct(SeckillStockChangeLogEntity changeLog) {
+    private boolean processClaimed(ClaimedChangeLog claimed) {
+        SeckillStockChangeLogEntity changeLog = claimed.changeLog();
+        if (!CHANGE_TYPE_DEDUCT.equals(changeLog.getChangeType())) {
+            updateStatusOrThrow(claimed, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+            return true;
+        }
+        return processDeduct(claimed);
+    }
+
+    private boolean processDeduct(ClaimedChangeLog claimed) {
+        SeckillStockChangeLogEntity changeLog = claimed.changeLog();
         String requestId = changeLog.getRequestId();
         Long bucketShardKey = changeLog.getBucketShardKey();
         if (requestId == null || requestId.isBlank()) {
@@ -119,7 +143,7 @@ public class SeckillOrderOutboxFromChangeLogService {
                 MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY,
                 bucketShardKey);
         if (outboxExists) {
-            updateStatusOrThrow(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+            updateStatusOrThrow(claimed, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
             return true;
         }
 
@@ -139,37 +163,70 @@ public class SeckillOrderOutboxFromChangeLogService {
                 snapshot.quantity(),
                 bucketShardKey);
         messagePublisher.enqueueSeckillOrderCreate(requestId, JsonUtils.toJson(objectMapper, orderRequest), bucketShardKey);
-        updateStatusOrThrow(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
+        updateStatusOrThrow(claimed, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOXED);
         return true;
     }
 
-    private boolean updateStatus(SeckillStockChangeLogEntity changeLog, String expectedStatus, String nextStatus) {
+    private void resetStaleStatus(SeckillStockChangeLogEntity changeLog, LocalDateTime before) {
+        if (changeLog.getBucketShardKey() != null) {
+            changeLogMapper.resetStaleStatusByShard(
+                    changeLog.getId(),
+                    changeLog.getBucketShardKey(),
+                    SeckillStockChangeLogStatus.OUTBOXING,
+                    SeckillStockChangeLogStatus.NEW,
+                    before);
+            return;
+        }
+        changeLogMapper.resetStaleStatus(
+                changeLog.getId(),
+                SeckillStockChangeLogStatus.OUTBOXING,
+                SeckillStockChangeLogStatus.NEW,
+                before);
+    }
+
+    private boolean updateStatusIfClaimed(ClaimedChangeLog claimed, String expectedStatus, String nextStatus) {
+        SeckillStockChangeLogEntity changeLog = claimed.changeLog();
         int updated;
         if (changeLog.getBucketShardKey() != null) {
-            updated = changeLogMapper.updateStatusByShard(
+            updated = changeLogMapper.updateStatusByShardIfClaimed(
                     changeLog.getId(),
                     changeLog.getBucketShardKey(),
                     expectedStatus,
-                    nextStatus);
+                    nextStatus,
+                    claimed.claimedAt());
         } else {
-            updated = changeLogMapper.updateStatus(changeLog.getId(), expectedStatus, nextStatus);
+            updated = changeLogMapper.updateStatusIfClaimed(
+                    changeLog.getId(),
+                    expectedStatus,
+                    nextStatus,
+                    claimed.claimedAt());
         }
         return updated > 0;
     }
 
-    private void updateStatusOrThrow(SeckillStockChangeLogEntity changeLog, String expectedStatus, String nextStatus) {
-        if (!updateStatus(changeLog, expectedStatus, nextStatus)) {
+    private void updateStatusOrThrow(ClaimedChangeLog claimed, String expectedStatus, String nextStatus) {
+        if (!updateStatusIfClaimed(claimed, expectedStatus, nextStatus)) {
             throw new IllegalStateException("Seckill change log status update failed, id="
-                    + changeLog.getId() + ", expectedStatus=" + expectedStatus + ", nextStatus=" + nextStatus);
+                    + claimed.changeLog().getId() + ", expectedStatus=" + expectedStatus + ", nextStatus=" + nextStatus);
         }
     }
 
-    private void markFailed(SeckillStockChangeLogEntity changeLog) {
+    private void markFailed(ClaimedChangeLog claimed) {
         try {
-            updateStatus(changeLog, SeckillStockChangeLogStatus.OUTBOXING, SeckillStockChangeLogStatus.OUTBOX_FAILED);
+            boolean marked = updateStatusIfClaimed(
+                    claimed,
+                    SeckillStockChangeLogStatus.OUTBOXING,
+                    SeckillStockChangeLogStatus.OUTBOX_FAILED);
+            if (!marked) {
+                log.warn("Skipped stale seckill change log failure mark because claim changed, changeLogId={}, requestId={}",
+                        claimed.changeLog().getId(), claimed.changeLog().getRequestId());
+            }
         } catch (RuntimeException exception) {
             log.warn("Failed to mark seckill change log outbox failed, changeLogId={}, requestId={}",
-                    changeLog.getId(), changeLog.getRequestId(), exception);
+                    claimed.changeLog().getId(), claimed.changeLog().getRequestId(), exception);
         }
+    }
+
+    private record ClaimedChangeLog(SeckillStockChangeLogEntity changeLog, LocalDateTime claimedAt) {
     }
 }
