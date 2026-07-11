@@ -37,6 +37,12 @@ public class SeckillEntryGuard {
         this.properties = properties == null ? new SeckillProperties() : properties;
     }
 
+    /**
+     * 用 request 级 Redis 键拦截同一幂等号的重试。
+     *
+     * <p>成功时只写入短 TTL 标记；失败时说明该 requestId 已进入过入口链路，
+     * 调用方应改为读取结果投影，避免再次占用 buyer key 和分桶库存。</p>
+     */
     public RequestDecision acquireRequest(String requestId) {
         if (!enabled()) {
             return new RequestDecision(RequestOutcome.ACQUIRED);
@@ -46,6 +52,12 @@ public class SeckillEntryGuard {
         return new RequestDecision(acquired ? RequestOutcome.ACQUIRED : RequestOutcome.DUPLICATE);
     }
 
+    /**
+     * 用 buyer 级 Redis 键拦截同一买家对同一活动 SKU 的并发提交。
+     *
+     * <p>键值保存 requestId：如果已有值等于当前 requestId，按同一次请求重试处理；
+     * 如果已有值不同，则说明同一买家已有另一笔请求在处理或已成功占位。</p>
+     */
     public BuyerDecision acquireBuyer(Long activityId,
                                       Long skuId,
                                       Long userId,
@@ -67,6 +79,11 @@ public class SeckillEntryGuard {
         return new BuyerDecision(BuyerOutcome.DUPLICATE_BUYER, existingRequestId);
     }
 
+    /**
+     * 只释放当前 requestId 持有的 buyer key。
+     *
+     * <p>Lua 中先比对 value 再删除，避免失败分支误删同一买家后续请求刚写入的新占位。</p>
+     */
     public void releaseBuyer(Long activityId, Long skuId, Long userId, String requestId) {
         if (!enabled()) {
             return;

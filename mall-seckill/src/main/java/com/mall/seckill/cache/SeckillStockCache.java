@@ -32,6 +32,12 @@ public class SeckillStockCache {
         }
     }
 
+    /**
+     * 读取 TairString 库存缓存，只用于售罄快速失败。
+     *
+     * <p>缓存 miss、版本值异常或 Redis/Tair 读取失败都会放行到数据库分桶库存，
+     * 数据库扣减仍是库存事实的唯一裁决点。</p>
+     */
     public boolean isSoldOut(Long activityId, Long skuId) {
         SeckillProperties.StockCache stockCache = stockCacheProperties();
         if (!stockCache.isEnabled() || !stockCache.isFailFast()) {

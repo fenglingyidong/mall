@@ -11,7 +11,6 @@ import com.mall.seckill.pojo.entity.SeckillSku;
 import com.mall.seckill.pojo.vo.SeckillActivityView;
 import com.mall.seckill.pojo.vo.SeckillResult;
 import com.mall.seckill.pojo.vo.SeckillSubmitResponse;
-import com.mall.seckill.pojo.vo.StockDeductionResult;
 import com.mall.seckill.service.SeckillService;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -39,6 +38,7 @@ public class SeckillServiceImpl implements SeckillService {
 
     private final SeckillRepository repository;
     private final SeckillStockCache stockCache;
+    private final SeckillEntryFactWriter entryFactWriter;
     private final SentinelSeckillGuard sentinelGuard;
     private final SeckillHotspotGuard hotspotGuard;
     private final SeckillEntryGuard entryGuard;
@@ -59,6 +59,7 @@ public class SeckillServiceImpl implements SeckillService {
     @Autowired
     public SeckillServiceImpl(SeckillRepository repository,
                               SeckillStockCache stockCache,
+                              SeckillEntryFactWriter entryFactWriter,
                               SentinelSeckillGuard sentinelGuard,
                               SeckillHotspotGuard hotspotGuard,
                               ObjectProvider<RedissonClient> redissonClient,
@@ -67,6 +68,7 @@ public class SeckillServiceImpl implements SeckillService {
                               SeckillEntryGuard entryGuard) {
         this.repository = repository;
         this.stockCache = stockCache;
+        this.entryFactWriter = entryFactWriter;
         this.sentinelGuard = sentinelGuard;
         this.hotspotGuard = hotspotGuard;
         this.entryGuard = entryGuard;
@@ -254,48 +256,39 @@ public class SeckillServiceImpl implements SeckillService {
             return failedSubmit(requestId, STOCK_NOT_ENOUGH);
         }
 
-        // snapshot 是请求级事实，也携带后续结果闭环需要的 bucket shard key。
-        SeckillRepository.SnapshotRegistration snapshotRegistration = repository.registerBucketSnapshot(
-                requestId,
-                sku.id(),
-                activityId,
-                skuId,
-                userId,
-                SECKILL_QUANTITY,
-                selectedBucket);
-        if (snapshotRegistration.outcome() == SeckillRepository.SnapshotRegistrationOutcome.REQUEST_DUPLICATE) {
+        // Writer 内部显式使用两段事务：snapshot 登记独立提交，bucket 扣减和 change_log 同事务提交。
+        SeckillEntryFactWriter.EntryFactResult entryFactResult = entryFactWriter.recordAcceptedEntry(
+                new SeckillEntryFactWriter.EntryFactCommand(
+                        requestId,
+                        sku.id(),
+                        activityId,
+                        skuId,
+                        userId,
+                        SECKILL_QUANTITY,
+                        selectedBucket));
+        // snapshot 主键冲突：同一 request 已有登记，直接查用户可见结果。
+        if (entryFactResult.outcome() == SeckillEntryFactWriter.EntryFactOutcome.REQUEST_DUPLICATE) {
             return responseFromExistingResultOrProcessing(requestId);
         }
-        if (snapshotRegistration.outcome() == SeckillRepository.SnapshotRegistrationOutcome.ACTIVE_DUPLICATE) {
+        // active_key 唯一约束冲突：同一买家已有另一笔活跃 snapshot。
+        if (entryFactResult.outcome() == SeckillEntryFactWriter.EntryFactOutcome.ACTIVE_DUPLICATE) {
             entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
             return failedSubmit(requestId, DUPLICATE_PURCHASE);
         }
-
-        // 分桶扣减和 change_log 插入是库存事实，并驱动后续异步订单 outbox 创建。
-        StockDeductionResult deductionResult;
-        try {
-            deductionResult = repository.recordBucketDeductionFact(
-                    requestId,
-                    activityId,
-                    skuId,
-                    selectedBucket,
-                    SECKILL_QUANTITY);
-        } catch (SeckillStockNotEnoughException exception) {
+        // bucket 扣减未成功：释放 buyer key，并把失败结果写入结果投影。
+        if (entryFactResult.outcome() == SeckillEntryFactWriter.EntryFactOutcome.STOCK_NOT_ENOUGH) {
             entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
-            repository.markRegisteredSnapshotFailed(requestId, "Stock not enough");
             return failedSubmit(requestId, STOCK_NOT_ENOUGH);
         }
-
-        // snapshot 登记后的失败必须关闭 REGISTERED snapshot，并释放 buyer key。
-        if (deductionResult.code() == DUPLICATE_PURCHASE) {
+        // change_log 唯一冲突：扣减事务已回滚，按重复购买失败处理。
+        if (entryFactResult.outcome() == SeckillEntryFactWriter.EntryFactOutcome.DEDUCT_DUPLICATE) {
             entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
-            repository.markRegisteredSnapshotFailed(requestId, "Duplicate purchase");
             return failedSubmit(requestId, DUPLICATE_PURCHASE);
         }
-        if (deductionResult.code() != DEDUCT_SUCCESS) {
+        // 未识别结果走保守失败分支，避免 buyer key 长时间占用。
+        if (entryFactResult.outcome() != SeckillEntryFactWriter.EntryFactOutcome.CREATED) {
             entryGuard.releaseBuyer(activityId, skuId, userId, requestId);
-            repository.markRegisteredSnapshotFailed(requestId, "Seckill failed");
-            return failedSubmit(requestId, deductionResult.code());
+            return failedSubmit(requestId, DEDUCT_SUCCESS);
         }
         return processingResponse(requestId);
     }

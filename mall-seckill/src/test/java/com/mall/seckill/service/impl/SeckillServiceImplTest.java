@@ -11,12 +11,12 @@ import com.mall.seckill.pojo.entity.SeckillActivity;
 import com.mall.seckill.pojo.entity.SeckillSku;
 import com.mall.seckill.pojo.vo.SeckillResult;
 import com.mall.seckill.pojo.vo.SeckillSubmitResponse;
-import com.mall.seckill.pojo.vo.StockDeductionResult;
 import com.mall.seckill.pojo.vo.StockVersion;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.redisson.api.RedissonClient;
@@ -44,6 +44,9 @@ class SeckillServiceImplTest {
 
     @Mock
     private SeckillStockCache stockCache;
+
+    @Mock
+    private SeckillEntryFactWriter entryFactWriter;
 
     @Mock
     private SentinelSeckillGuard sentinelGuard;
@@ -77,7 +80,7 @@ class SeckillServiceImplTest {
     }
 
     @Test
-    void asyncEntrySubmitShouldRegisterSnapshotAndDeductionFactWithoutOrderOutbox() {
+    void asyncEntrySubmitShouldRecordEntryFactWithoutOrderOutbox() {
         SeckillServiceImpl service = newAsyncEntryService();
         SeckillActivity activity = activeActivity();
         SeckillSku sku = sku();
@@ -89,10 +92,8 @@ class SeckillServiceImplTest {
         when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
                 .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
         when(repository.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(repository.registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket))
-                .thenReturn(snapshotCreated("client-r1"));
-        when(repository.recordBucketDeductionFact("client-r1", 1L, 1001L, selectedBucket, 1))
-                .thenReturn(StockDeductionResult.success(new StockVersion(49, 1L)));
+        when(entryFactWriter.recordAcceptedEntry(any()))
+                .thenReturn(entryCreated("client-r1", selectedBucket));
 
         UserContext.set(new UserInfo(101L, "u101"));
         SeckillSubmitResponse response = service.submit(1L, 1001L, "client-r1");
@@ -100,8 +101,17 @@ class SeckillServiceImplTest {
         assertThat(response.requestId()).isEqualTo("client-r1");
         assertThat(response.status()).isEqualTo("PROCESSING");
         assertThat(response.message()).isEqualTo("Processing");
-        verify(repository).registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket);
-        verify(repository).recordBucketDeductionFact("client-r1", 1L, 1001L, selectedBucket, 1);
+        ArgumentCaptor<SeckillEntryFactWriter.EntryFactCommand> commandCaptor =
+                ArgumentCaptor.forClass(SeckillEntryFactWriter.EntryFactCommand.class);
+        verify(entryFactWriter).recordAcceptedEntry(commandCaptor.capture());
+        SeckillEntryFactWriter.EntryFactCommand command = commandCaptor.getValue();
+        assertThat(command.requestId()).isEqualTo("client-r1");
+        assertThat(command.stockId()).isEqualTo(10L);
+        assertThat(command.activityId()).isEqualTo(1L);
+        assertThat(command.skuId()).isEqualTo(1001L);
+        assertThat(command.userId()).isEqualTo(101L);
+        assertThat(command.quantity()).isEqualTo(1);
+        assertThat(command.selectedBucket()).isEqualTo(selectedBucket);
         verify(repository, never()).saveResult(any());
     }
 
@@ -118,10 +128,11 @@ class SeckillServiceImplTest {
         when(entryGuard.acquireBuyer(eq(1L), eq(1001L), anyLong(), anyString(), eq(activity.endAt())))
                 .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
         when(repository.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(repository.registerBucketSnapshot(anyString(), eq(10L), eq(1L), eq(1001L), anyLong(), eq(1), eq(selectedBucket)))
-                .thenAnswer(invocation -> snapshotCreated(invocation.getArgument(0)));
-        when(repository.recordBucketDeductionFact(anyString(), eq(1L), eq(1001L), eq(selectedBucket), eq(1)))
-                .thenReturn(StockDeductionResult.success(null));
+        when(entryFactWriter.recordAcceptedEntry(any()))
+                .thenAnswer(invocation -> {
+                    SeckillEntryFactWriter.EntryFactCommand command = invocation.getArgument(0);
+                    return entryCreated(command.requestId(), selectedBucket);
+                });
 
         UserContext.set(new UserInfo(101L, "u101"));
         SeckillSubmitResponse first = service.submit(1L, 1001L, null);
@@ -132,8 +143,7 @@ class SeckillServiceImplTest {
         assertThat(second.status()).isEqualTo("PROCESSING");
         verify(repository, times(1)).requireActivity(1L);
         verify(repository, times(1)).requireSku(1L, 1001L);
-        verify(repository, times(2)).registerBucketSnapshot(anyString(), eq(10L), eq(1L), eq(1001L), anyLong(), eq(1), eq(selectedBucket));
-        verify(repository, times(2)).recordBucketDeductionFact(anyString(), eq(1L), eq(1001L), eq(selectedBucket), eq(1));
+        verify(entryFactWriter, times(2)).recordAcceptedEntry(any());
         verify(stockCache, never()).refresh(anyLong(), anyLong(), any());
     }
 
@@ -150,17 +160,18 @@ class SeckillServiceImplTest {
         when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
                 .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
         when(repository.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(repository.registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket))
-                .thenReturn(snapshotCreated("client-r1"));
-        when(repository.recordBucketDeductionFact("client-r1", 1L, 1001L, selectedBucket, 1))
-                .thenReturn(StockDeductionResult.success(null));
+        when(entryFactWriter.recordAcceptedEntry(any()))
+                .thenReturn(entryCreated("client-r1", selectedBucket));
 
         UserContext.set(new UserInfo(101L, "u101"));
         SeckillSubmitResponse response = service.submit(1L, 1001L, " client-r1 ");
 
         assertThat(response.requestId()).isEqualTo("client-r1");
         verify(entryGuard).acquireRequest("client-r1");
-        verify(repository).registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket);
+        ArgumentCaptor<SeckillEntryFactWriter.EntryFactCommand> commandCaptor =
+                ArgumentCaptor.forClass(SeckillEntryFactWriter.EntryFactCommand.class);
+        verify(entryFactWriter).recordAcceptedEntry(commandCaptor.capture());
+        assertThat(commandCaptor.getValue().requestId()).isEqualTo("client-r1");
     }
 
     @Test
@@ -180,6 +191,7 @@ class SeckillServiceImplTest {
         assertThat(response.message()).isEqualTo("Processing");
         verify(entryGuard, never()).acquireBuyer(anyLong(), anyLong(), anyLong(), anyString(), any());
         verify(repository, never()).selectBucket(anyLong(), anyLong());
+        verify(entryFactWriter, never()).recordAcceptedEntry(any());
     }
 
     @Test
@@ -199,7 +211,7 @@ class SeckillServiceImplTest {
 
         assertThat(response.status()).isEqualTo("PROCESSING");
         verify(repository, never()).selectBucket(anyLong(), anyLong());
-        verify(repository, never()).registerBucketSnapshot(anyString(), anyLong(), anyLong(), anyLong(), anyLong(), eq(1), any());
+        verify(entryFactWriter, never()).recordAcceptedEntry(any());
     }
 
     @Test
@@ -219,6 +231,7 @@ class SeckillServiceImplTest {
         assertThat(response.status()).isEqualTo("FAILED");
         assertThat(response.message()).isEqualTo("Duplicate purchase");
         verify(repository, never()).selectBucket(anyLong(), anyLong());
+        verify(entryFactWriter, never()).recordAcceptedEntry(any());
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Duplicate purchase"));
     }
 
@@ -241,8 +254,7 @@ class SeckillServiceImplTest {
         assertThat(response.message()).isEqualTo("Stock not enough");
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
         verify(repository, never()).selectBucket(anyLong(), anyLong());
-        verify(repository, never()).registerBucketSnapshot(anyString(), anyLong(), anyLong(), anyLong(), anyLong(), eq(1), any());
-        verify(repository, never()).recordBucketDeductionFact(anyString(), anyLong(), anyLong(), any(), eq(1));
+        verify(entryFactWriter, never()).recordAcceptedEntry(any());
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Stock not enough"));
     }
 
@@ -264,12 +276,12 @@ class SeckillServiceImplTest {
         assertThat(response.status()).isEqualTo("FAILED");
         assertThat(response.message()).isEqualTo("Stock not enough");
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
-        verify(repository, never()).registerBucketSnapshot(anyString(), anyLong(), anyLong(), anyLong(), anyLong(), eq(1), any());
+        verify(entryFactWriter, never()).recordAcceptedEntry(any());
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Stock not enough"));
     }
 
     @Test
-    void asyncEntrySubmitShouldReturnExistingResultWhenSnapshotReportsRequestDuplicate() {
+    void asyncEntrySubmitShouldReturnExistingResultWhenEntryFactReportsRequestDuplicate() {
         SeckillServiceImpl service = newAsyncEntryService();
         SeckillActivity activity = activeActivity();
         SeckillBucketService.SelectedBucket selectedBucket = bucket();
@@ -280,10 +292,8 @@ class SeckillServiceImplTest {
         when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
                 .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
         when(repository.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(repository.registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket))
-                .thenReturn(new SeckillRepository.SnapshotRegistration(
-                        SeckillRepository.SnapshotRegistrationOutcome.REQUEST_DUPLICATE,
-                        null));
+        when(entryFactWriter.recordAcceptedEntry(any()))
+                .thenReturn(entryResult(SeckillEntryFactWriter.EntryFactOutcome.REQUEST_DUPLICATE, "client-r1", selectedBucket));
         when(repository.result("client-r1"))
                 .thenReturn(new SeckillResult("client-r1", "PROCESSING", null, "Processing"));
 
@@ -291,12 +301,11 @@ class SeckillServiceImplTest {
         SeckillSubmitResponse response = service.submit(1L, 1001L, "client-r1");
 
         assertThat(response.status()).isEqualTo("PROCESSING");
-        verify(repository, never()).recordBucketDeductionFact(anyString(), anyLong(), anyLong(), any(), eq(1));
         verify(entryGuard, never()).releaseBuyer(anyLong(), anyLong(), anyLong(), anyString());
     }
 
     @Test
-    void asyncEntrySubmitShouldReleaseBuyerWhenSnapshotReportsActiveDuplicate() {
+    void asyncEntrySubmitShouldReleaseBuyerWhenEntryFactReportsActiveDuplicate() {
         SeckillServiceImpl service = newAsyncEntryService();
         SeckillActivity activity = activeActivity();
         SeckillBucketService.SelectedBucket selectedBucket = bucket();
@@ -307,10 +316,8 @@ class SeckillServiceImplTest {
         when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
                 .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
         when(repository.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(repository.registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket))
-                .thenReturn(new SeckillRepository.SnapshotRegistration(
-                        SeckillRepository.SnapshotRegistrationOutcome.ACTIVE_DUPLICATE,
-                        null));
+        when(entryFactWriter.recordAcceptedEntry(any()))
+                .thenReturn(entryResult(SeckillEntryFactWriter.EntryFactOutcome.ACTIVE_DUPLICATE, "client-r1", selectedBucket));
 
         UserContext.set(new UserInfo(101L, "u101"));
         SeckillSubmitResponse response = service.submit(1L, 1001L, "client-r1");
@@ -318,12 +325,11 @@ class SeckillServiceImplTest {
         assertThat(response.status()).isEqualTo("FAILED");
         assertThat(response.message()).isEqualTo("Duplicate purchase");
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
-        verify(repository, never()).recordBucketDeductionFact(anyString(), anyLong(), anyLong(), any(), eq(1));
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Duplicate purchase"));
     }
 
     @Test
-    void asyncEntrySubmitShouldReleaseBuyerAndMarkSnapshotFailedWhenDeductionFactStockNotEnough() {
+    void asyncEntrySubmitShouldReleaseBuyerWhenEntryFactReportsStockNotEnough() {
         SeckillServiceImpl service = newAsyncEntryService();
         SeckillActivity activity = activeActivity();
         SeckillBucketService.SelectedBucket selectedBucket = bucket();
@@ -334,10 +340,8 @@ class SeckillServiceImplTest {
         when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
                 .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
         when(repository.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(repository.registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket))
-                .thenReturn(snapshotCreated("client-r1"));
-        when(repository.recordBucketDeductionFact("client-r1", 1L, 1001L, selectedBucket, 1))
-                .thenThrow(new SeckillStockNotEnoughException());
+        when(entryFactWriter.recordAcceptedEntry(any()))
+                .thenReturn(entryResult(SeckillEntryFactWriter.EntryFactOutcome.STOCK_NOT_ENOUGH, "client-r1", selectedBucket));
 
         UserContext.set(new UserInfo(101L, "u101"));
         SeckillSubmitResponse response = service.submit(1L, 1001L, "client-r1");
@@ -345,12 +349,12 @@ class SeckillServiceImplTest {
         assertThat(response.status()).isEqualTo("FAILED");
         assertThat(response.message()).isEqualTo("Stock not enough");
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
-        verify(repository).markRegisteredSnapshotFailed("client-r1", "Stock not enough");
+        verify(repository, never()).markRegisteredSnapshotFailed(anyString(), anyString());
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Stock not enough"));
     }
 
     @Test
-    void asyncEntrySubmitShouldReleaseBuyerAndMarkSnapshotFailedWhenDeductionFactDuplicate() {
+    void asyncEntrySubmitShouldReleaseBuyerWhenEntryFactReportsDeductDuplicate() {
         SeckillServiceImpl service = newAsyncEntryService();
         SeckillActivity activity = activeActivity();
         SeckillBucketService.SelectedBucket selectedBucket = bucket();
@@ -361,10 +365,8 @@ class SeckillServiceImplTest {
         when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
                 .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
         when(repository.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(repository.registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket))
-                .thenReturn(snapshotCreated("client-r1"));
-        when(repository.recordBucketDeductionFact("client-r1", 1L, 1001L, selectedBucket, 1))
-                .thenReturn(StockDeductionResult.duplicate());
+        when(entryFactWriter.recordAcceptedEntry(any()))
+                .thenReturn(entryResult(SeckillEntryFactWriter.EntryFactOutcome.DEDUCT_DUPLICATE, "client-r1", selectedBucket));
 
         UserContext.set(new UserInfo(101L, "u101"));
         SeckillSubmitResponse response = service.submit(1L, 1001L, "client-r1");
@@ -372,7 +374,7 @@ class SeckillServiceImplTest {
         assertThat(response.status()).isEqualTo("FAILED");
         assertThat(response.message()).isEqualTo("Duplicate purchase");
         verify(entryGuard).releaseBuyer(1L, 1001L, 101L, "client-r1");
-        verify(repository).markRegisteredSnapshotFailed("client-r1", "Duplicate purchase");
+        verify(repository, never()).markRegisteredSnapshotFailed(anyString(), anyString());
         verify(repository).saveResult(new SeckillResult("client-r1", "FAILED", null, "Duplicate purchase"));
     }
 
@@ -389,10 +391,8 @@ class SeckillServiceImplTest {
         when(entryGuard.acquireBuyer(eq(1L), eq(1001L), eq(101L), eq("client-r1"), eq(activity.endAt())))
                 .thenReturn(new SeckillEntryGuard.BuyerDecision(SeckillEntryGuard.BuyerOutcome.ACQUIRED, null));
         when(repository.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(repository.registerBucketSnapshot("client-r1", 10L, 1L, 1001L, 101L, 1, selectedBucket))
-                .thenReturn(snapshotCreated("client-r1"));
-        when(repository.recordBucketDeductionFact("client-r1", 1L, 1001L, selectedBucket, 1))
-                .thenReturn(StockDeductionResult.success(null));
+        when(entryFactWriter.recordAcceptedEntry(any()))
+                .thenReturn(entryCreated("client-r1", selectedBucket));
 
         UserContext.set(new UserInfo(101L, "u101"));
         SeckillSubmitResponse response = service.submit(1L, 1001L, "client-r1");
@@ -429,10 +429,20 @@ class SeckillServiceImplTest {
         when(entryGuard.enabled()).thenReturn(true);
     }
 
-    private SeckillRepository.SnapshotRegistration snapshotCreated(String requestId) {
-        return new SeckillRepository.SnapshotRegistration(
-                SeckillRepository.SnapshotRegistrationOutcome.CREATED,
-                new SeckillRepository.StockSnapshot(requestId, 1L, 1001L, 101L, 1, "REGISTERED"));
+    private SeckillEntryFactWriter.EntryFactResult entryCreated(String requestId,
+                                                                SeckillBucketService.SelectedBucket selectedBucket) {
+        return entryResult(SeckillEntryFactWriter.EntryFactOutcome.CREATED, requestId, selectedBucket);
+    }
+
+    private SeckillEntryFactWriter.EntryFactResult entryResult(SeckillEntryFactWriter.EntryFactOutcome outcome,
+                                                               String requestId,
+                                                               SeckillBucketService.SelectedBucket selectedBucket) {
+        return new SeckillEntryFactWriter.EntryFactResult(
+                outcome,
+                null,
+                new SeckillEntryFactWriter.EntryStockSnapshot(requestId, 1L, 1001L, 101L, 1, "REGISTERED"),
+                selectedBucket,
+                null);
     }
 
     private SeckillActivity activeActivity() {
@@ -471,6 +481,7 @@ class SeckillServiceImplTest {
         return new SeckillServiceImpl(
                 repository,
                 stockCache,
+                entryFactWriter,
                 sentinelGuard,
                 hotspotGuard,
                 emptyRedissonProvider(),
@@ -503,5 +514,4 @@ class SeckillServiceImplTest {
             }
         };
     }
-
 }

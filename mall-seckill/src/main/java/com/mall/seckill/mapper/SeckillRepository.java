@@ -12,7 +12,6 @@ import com.mall.seckill.pojo.entity.SeckillSkuEntity;
 import com.mall.seckill.pojo.vo.SeckillActivityView;
 import com.mall.seckill.pojo.vo.SeckillResult;
 import com.mall.seckill.pojo.vo.StockDeductProbeResponse;
-import com.mall.seckill.pojo.vo.StockDeductionResult;
 import com.mall.seckill.pojo.vo.StockReleaseResult;
 import com.mall.seckill.pojo.vo.StockVersion;
 import com.mall.seckill.service.impl.SeckillBucketService;
@@ -22,8 +21,6 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Repository;
-import org.springframework.transaction.interceptor.TransactionAspectSupport;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
@@ -54,8 +51,6 @@ public class SeckillRepository {
     private final Timer stockDeductSelectTimer;
     private final Timer stockDeductUpdateOnlyTotalTimer;
     private final Timer stockDeductUpdateOnlyUpdateTimer;
-    private final Timer recordDeductionSnapshotInsertTimer;
-    private final Timer recordDeductionStockUpdateTimer;
     private final Timer resultSaveTimer;
     private final Timer releaseDeductionTotalTimer;
     private final Timer releaseDeductionSnapshotUpdateTimer;
@@ -120,8 +115,6 @@ public class SeckillRepository {
         this.stockDeductSelectTimer = timer("seckill.stock.deduct.select", "Stock-only load test stock/version select latency");
         this.stockDeductUpdateOnlyTotalTimer = timer("seckill.stock.deduct.update-only.total", "Stock-only load test MyBatis update-only total latency");
         this.stockDeductUpdateOnlyUpdateTimer = timer("seckill.stock.deduct.update-only.update", "Stock-only load test MyBatis update-only update latency");
-        this.recordDeductionSnapshotInsertTimer = timer("seckill.submit.record.snapshot.insert", "Official submit stock snapshot insert latency");
-        this.recordDeductionStockUpdateTimer = timer("seckill.submit.record.stock.update", "Official submit stock update latency");
         this.resultSaveTimer = timer("seckill.submit.result.save", "Official submit result save latency");
         this.releaseDeductionTotalTimer = timer("seckill.submit.release.total", "Official submit stock release transaction latency");
         this.releaseDeductionSnapshotUpdateTimer = timer("seckill.submit.release.snapshot.update", "Official submit stock snapshot release update latency");
@@ -168,62 +161,6 @@ public class SeckillRepository {
             throw new BusinessException(409, "Seckill bucket mode is not enabled");
         }
         return bucketService.selectBucket(activityId, skuId);
-    }
-
-    @Transactional(rollbackFor = Exception.class)
-    public SnapshotRegistration registerBucketSnapshot(String requestId,
-                                                       Long stockId,
-                                                       Long activityId,
-                                                       Long skuId,
-                                                       Long userId,
-                                                       int quantity,
-                                                       SeckillBucketService.SelectedBucket selectedBucket) {
-        SeckillStockSnapshotEntity snapshot = new SeckillStockSnapshotEntity();
-        snapshot.setRequestId(requestId);
-        snapshot.setStockId(stockId);
-        snapshot.setBucketId(selectedBucket.bucketId());
-        snapshot.setBucketNo(selectedBucket.bucketNo());
-        snapshot.setBucketShardKey(selectedBucket.bucketShardKey());
-        snapshot.setStrategyVersion(selectedBucket.strategyVersion());
-        snapshot.setActivityId(activityId);
-        snapshot.setSkuId(skuId);
-        snapshot.setUserId(userId);
-        snapshot.setActiveKey(userId);
-        snapshot.setQuantity(quantity);
-        snapshot.setStatus("REGISTERED");
-        snapshot.setMessage("Registered");
-        LocalDateTime now = LocalDateTime.now();
-        snapshot.setCreatedAt(now);
-        snapshot.setUpdatedAt(now);
-        try {
-            recordDeductionSnapshotInsertTimer.record(() -> snapshotMapper.insert(snapshot));
-            return new SnapshotRegistration(SnapshotRegistrationOutcome.CREATED, toStockSnapshot(snapshot));
-        } catch (DuplicateKeyException exception) {
-            SeckillStockSnapshotEntity duplicate = snapshotMapper.selectById(requestId);
-            if (duplicate != null) {
-                return new SnapshotRegistration(SnapshotRegistrationOutcome.REQUEST_DUPLICATE, toStockSnapshot(duplicate));
-            }
-            return new SnapshotRegistration(SnapshotRegistrationOutcome.ACTIVE_DUPLICATE, null);
-        }
-    }
-
-    @Transactional(rollbackFor = Exception.class)
-    public StockDeductionResult recordBucketDeductionFact(String requestId,
-                                                          Long activityId,
-                                                          Long skuId,
-                                                          SeckillBucketService.SelectedBucket selectedBucket,
-                                                          int quantity) {
-        // if (hasDeductChangeLog(requestId, selectedBucket.bucketShardKey())) {
-        //     return StockDeductionResult.duplicate();
-        // }
-        try {
-            SeckillBucketService.BucketMutationResult bucketResult = recordDeductionStockUpdateTimer.record(() ->
-                    bucketService.deductSelectedAndRecordChangeLog(selectedBucket, requestId, activityId, skuId, quantity));
-            return StockDeductionResult.success(bucketResult.stockVersion());
-        } catch (DuplicateKeyException exception) {
-            markCurrentTransactionRollbackOnly();
-            return StockDeductionResult.duplicate();
-        }
     }
 
     public void markRegisteredSnapshotFailed(String requestId, String message) {
@@ -519,12 +456,6 @@ public class SeckillRepository {
                 && changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey(requestId, "DEDUCT", bucketShardKey) > 0;
     }
 
-    private void markCurrentTransactionRollbackOnly() {
-        if (TransactionSynchronizationManager.isActualTransactionActive()) {
-            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
-        }
-    }
-
     public boolean isBucketModeEnabled() {
         return bucketModeEnabled();
     }
@@ -546,15 +477,6 @@ public class SeckillRepository {
                                 Long userId,
                                 Integer quantity,
                                 String status) {
-    }
-
-    public record SnapshotRegistration(SnapshotRegistrationOutcome outcome, StockSnapshot snapshot) {
-    }
-
-    public enum SnapshotRegistrationOutcome {
-        CREATED,
-        REQUEST_DUPLICATE,
-        ACTIVE_DUPLICATE
     }
 
     public record ActivitySkuKey(Long activityId, Long skuId) {

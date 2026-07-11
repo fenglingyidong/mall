@@ -214,6 +214,12 @@ public class SeckillBucketService {
         return new BucketDeductOnlyResult(updated > 0, selectedBucket);
     }
 
+    /**
+     * 从 survivor bucket 列表中随机起点轮询一个仍可扣减的业务桶。
+     *
+     * <p>每次请求先读分桶配置，再按 bucket_no 和 shard_key 查询 ACTIVE 且有库存的桶；
+     * 临时耗尽缓存只减少短时间内对已空桶的无效查询，不参与库存裁决。</p>
+     */
     private SelectedBucket selectBucketExcluding(Long activityId, Long skuId) {
         SeckillBucketConfigEntity config = requireConfig(activityId, skuId);
         List<Integer> survivors = parseSurvivors(config.getSurvivorBuckets());
@@ -300,10 +306,16 @@ public class SeckillBucketService {
         eventPublisher.publishEvent(new SeckillDeductCommittedEvent(requestId, bucketShardKey));
     }
 
-    private SeckillStockBucketEntity markBucketEmptyIfExhausted(Long activityId,
-                                                                Long skuId,
-                                                                Long bucketId,
-                                                                Long bucketShardKey) {
+    /**
+     * 扣减失败后确认桶是否真的耗尽，并把耗尽桶短暂摘出路由。
+     *
+     * <p>先按 id/shard_key 读当前桶状态；只有 saleable_quantity 已经非正数时才标记 EMPTY，
+     * 避免把普通并发 CAS 失败误判成永久售罄。</p>
+     */
+    SeckillStockBucketEntity markBucketEmptyIfExhausted(Long activityId,
+                                                        Long skuId,
+                                                        Long bucketId,
+                                                        Long bucketShardKey) {
         SeckillStockBucketEntity bucket = bucketMapper.selectByIdAndShardKey(bucketId, bucketShardKey);
         if (bucket != null && bucket.getSaleableQuantity() != null && bucket.getSaleableQuantity() <= 0) {
             rememberTemporarilyExhausted(activityId, skuId, bucket.getBucketNo());
@@ -354,21 +366,21 @@ public class SeckillBucketService {
         return Math.max(0, properties.getBucket().getAvailability().getExhaustedBucketTtlMillis());
     }
 
-    private boolean tryTransfer(String requestId,
-                                Long activityId,
-                                Long skuId,
-                                SeckillStockBucketEntity targetBucket) {
+    boolean tryTransfer(String requestId,
+                        Long activityId,
+                        Long skuId,
+                        SeckillStockBucketEntity targetBucket) {
         if (transferService == null) {
             return false;
         }
         return transferService.transfer(requestId, activityId, skuId, targetBucket).transferred();
     }
 
-    private int maxTransferAttempts() {
+    int maxTransferAttempts() {
         return transferService == null ? 0 : transferService.maxAttempts();
     }
 
-    private boolean shouldAttemptRequestTransfer(Long activityId, Long skuId, Long bucketId) {
+    boolean shouldAttemptRequestTransfer(Long activityId, Long skuId, Long bucketId) {
         long minIntervalMillis = requestTransferMinIntervalMillis();
         if (minIntervalMillis <= 0) {
             return true;
@@ -472,7 +484,7 @@ public class SeckillBucketService {
         return stockVersion == null ? new StockVersion(0, 0L) : stockVersion;
     }
 
-    private StockVersion hotPathStockVersion(Long activityId, Long skuId) {
+    StockVersion hotPathStockVersion(Long activityId, Long skuId) {
         if (!properties.getBucket().isHotPathAggregateRead()) {
             return null;
         }

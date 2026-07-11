@@ -8,7 +8,6 @@ import com.mall.seckill.pojo.entity.SeckillSkuEntity;
 import com.mall.seckill.pojo.entity.SeckillResultEntity;
 import com.mall.seckill.config.SeckillProperties;
 import com.mall.seckill.pojo.vo.StockDeductProbeResponse;
-import com.mall.seckill.pojo.vo.StockDeductionResult;
 import com.mall.seckill.pojo.vo.StockReleaseResult;
 import com.mall.seckill.pojo.vo.StockVersion;
 import com.mall.seckill.service.impl.SeckillBucketService;
@@ -84,93 +83,6 @@ class SeckillRepositoryTest {
     @BeforeEach
     void setUp() {
         repository = new SeckillRepository(activityMapper, skuMapper, resultMapper, snapshotMapper, new SimpleMeterRegistry());
-    }
-
-    @Test
-    void shouldRegisterBucketSnapshotAsRegisteredWithoutDeductingOrSavingResult() {
-        SeckillRepository bucketRepository = bucketRepository();
-        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-
-        SeckillRepository.SnapshotRegistration registration = bucketRepository.registerBucketSnapshot(
-                "r1", 10L, 1L, 1001L, 101L, 1, selectedBucket);
-
-        assertThat(registration.outcome()).isEqualTo(SeckillRepository.SnapshotRegistrationOutcome.CREATED);
-        ArgumentCaptor<SeckillStockSnapshotEntity> snapshotCaptor = ArgumentCaptor.forClass(SeckillStockSnapshotEntity.class);
-        verify(snapshotMapper).insert(snapshotCaptor.capture());
-        SeckillStockSnapshotEntity snapshot = snapshotCaptor.getValue();
-        assertThat(snapshot.getRequestId()).isEqualTo("r1");
-        assertThat(snapshot.getActiveKey()).isEqualTo(101L);
-        assertThat(snapshot.getBucketId()).isEqualTo(99L);
-        assertThat(snapshot.getBucketShardKey()).isEqualTo(3L);
-        assertThat(snapshot.getStatus()).isEqualTo("REGISTERED");
-        verify(bucketService, never()).deductSelectedAndRecordChangeLog(any(), any(), any(), any(), anyInt());
-        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
-    }
-
-    @Test
-    void shouldReportRequestDuplicateWhenSnapshotInsertRejectsExistingRequest() {
-        SeckillRepository bucketRepository = bucketRepository();
-        SeckillStockSnapshotEntity existing = snapshot("r1", "REGISTERED", 1);
-        when(snapshotMapper.insert(any(SeckillStockSnapshotEntity.class)))
-                .thenThrow(new DuplicateKeyException("duplicate request"));
-        when(snapshotMapper.selectById("r1")).thenReturn(existing);
-
-        SeckillRepository.SnapshotRegistration registration = bucketRepository.registerBucketSnapshot(
-                "r1", 10L, 1L, 1001L, 101L, 1, new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L));
-
-        assertThat(registration.outcome()).isEqualTo(SeckillRepository.SnapshotRegistrationOutcome.REQUEST_DUPLICATE);
-        assertThat(registration.snapshot()).isNotNull();
-        verify(snapshotMapper).insert(any(SeckillStockSnapshotEntity.class));
-    }
-
-    @Test
-    void shouldReportActiveDuplicateWhenSnapshotActiveKeyRejectsInsert() {
-        SeckillRepository bucketRepository = bucketRepository();
-        when(snapshotMapper.selectById("r2")).thenReturn(null);
-        when(snapshotMapper.insert(any(SeckillStockSnapshotEntity.class)))
-                .thenThrow(new DuplicateKeyException("duplicate active user"));
-
-        SeckillRepository.SnapshotRegistration registration = bucketRepository.registerBucketSnapshot(
-                "r2", 10L, 1L, 1001L, 101L, 1, new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L));
-
-        assertThat(registration.outcome()).isEqualTo(SeckillRepository.SnapshotRegistrationOutcome.ACTIVE_DUPLICATE);
-        assertThat(registration.snapshot()).isNull();
-        verify(snapshotMapper).insert(any(SeckillStockSnapshotEntity.class));
-    }
-
-    @Test
-    void shouldRecordBucketDeductionFactWithoutUpdatingSnapshotOrSavingResult() {
-        SeckillRepository bucketRepository = bucketRepository();
-        StockVersion stockVersion = new StockVersion(48, 8L);
-        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        when(bucketService.deductSelectedAndRecordChangeLog(selectedBucket, "r1", 1L, 1001L, 1))
-                .thenReturn(new SeckillBucketService.BucketMutationResult(stockVersion, 1000L, selectedBucket));
-
-        StockDeductionResult result = bucketRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
-
-        assertThat(result.code()).isZero();
-        assertThat(result.stockVersion()).isEqualTo(stockVersion);
-        verify(changeLogMapper, never()).countByRequestIdAndChangeTypeAndBucketShardKey(any(), any(), any());
-        verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
-        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
-    }
-
-    @Test
-    void shouldRollbackTransactionWhenDeductFactDuplicateRacesAfterBucketDeduct() {
-        SeckillRepository bucketRepository = bucketRepository();
-        RecordingTransactionManager transactionManager = new RecordingTransactionManager();
-        SeckillRepository transactionalRepository = transactionalProxy(bucketRepository, transactionManager);
-        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        when(bucketService.deductSelectedAndRecordChangeLog(selectedBucket, "r1", 1L, 1001L, 1))
-                .thenThrow(new DuplicateKeyException("duplicate deduct fact"));
-
-        StockDeductionResult result = transactionalRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
-
-        assertThat(result.code()).isEqualTo(2);
-        assertThat(transactionManager.rolledBack).isTrue();
-        assertThat(transactionManager.committed).isFalse();
-        verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
-        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
     }
 
     @Test
@@ -473,16 +385,6 @@ class SeckillRepositoryTest {
                     assertThat(field.getProperty()).isEqualTo("version");
                     assertThat(field.getColumn()).isEqualTo("version");
                 });
-    }
-
-    @Test
-    void shouldUseStockVersionValueObject() {
-        StockVersion stockVersion = new StockVersion(9, 3L);
-        StockDeductionResult result = StockDeductionResult.success(stockVersion);
-
-        assertThat(result.code()).isZero();
-        assertThat(result.stockVersion()).isEqualTo(stockVersion);
-        assertThat(StockDeductionResult.duplicate().code()).isEqualTo(2);
     }
 
     private SeckillStockSnapshotEntity snapshot(String requestId, String status, int quantity) {

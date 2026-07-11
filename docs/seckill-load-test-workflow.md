@@ -148,7 +148,13 @@ rtk proxy powershell -NoProfile -Command "`$rid='smoke-'+[guid]::NewGuid().ToStr
 先准备本轮指标产物目录：
 
 ```powershell
-rtk proxy powershell -NoProfile -Command "$ts = Get-Date -Format 'yyyyMMdd-HHmmss'; $metrics = \"target\loadtest\stage3c-current\metrics-$ts\"; New-Item -ItemType Directory -Force $metrics | Out-Null; Set-Content -Encoding UTF8 -Path 'target\loadtest\stage3c-current\last-metrics-dir.txt' -Value $metrics; Write-Output \"METRICS=$metrics\""
+@'
+$ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+$metrics = "target\loadtest\stage3c-current\metrics-$ts"
+New-Item -ItemType Directory -Force $metrics | Out-Null
+Set-Content -Encoding UTF8 -Path 'target\loadtest\stage3c-current\last-metrics-dir.txt' -Value $metrics
+Write-Output "METRICS=$metrics"
+'@ | rtk proxy powershell -NoProfile -
 ```
 
 抓压测前快照：
@@ -169,19 +175,40 @@ rtk proxy powershell -NoProfile -ExecutionPolicy Bypass -File "scripts/loadtest/
 先启动指标轮询任务：
 
 ```powershell
-rtk proxy powershell -NoProfile -Command "$scriptPath = (Resolve-Path 'scripts/loadtest/stage3c/collect-seckill-metrics.ps1').Path; $metrics = (Get-Content -Raw -Encoding UTF8 'target\loadtest\stage3c-current\last-metrics-dir.txt').Trim(); $job = Start-Job -ScriptBlock { param($path, $dir) powershell -NoProfile -ExecutionPolicy Bypass -File $path -Mode Watch -BaseUrl 'http://localhost:8105' -OutputDir $dir -IntervalSeconds 2 -DurationSeconds 300 } -ArgumentList $scriptPath, $metrics; Set-Content -Encoding UTF8 -Path 'target\loadtest\stage3c-current\last-metrics-job.txt' -Value $job.Id; Write-Output \"METRICS_JOB=$($job.Id)\""
+@'
+$scriptPath = (Resolve-Path 'scripts/loadtest/stage3c/collect-seckill-metrics.ps1').Path
+$metrics = (Get-Content -Raw -Encoding UTF8 'target\loadtest\stage3c-current\last-metrics-dir.txt').Trim()
+$job = Start-Job -ScriptBlock {
+    param($path, $dir)
+    powershell -NoProfile -ExecutionPolicy Bypass -File $path -Mode Watch -BaseUrl 'http://localhost:8105' -OutputDir $dir -IntervalSeconds 2 -DurationSeconds 300
+} -ArgumentList $scriptPath, $metrics
+Set-Content -Encoding UTF8 -Path 'target\loadtest\stage3c-current\last-metrics-job.txt' -Value $job.Id
+Write-Output "METRICS_JOB=$($job.Id)"
+'@ | rtk proxy powershell -NoProfile -
 ```
 
 再执行 JMeter：
 
 ```powershell
-rtk proxy powershell -NoProfile -Command "$ts = Get-Date -Format 'yyyyMMdd-HHmmss'; $jtl = \"target\loadtest\stage3c-current\submit-$ts.jtl\"; $report = \"target\loadtest\stage3c-current\report-$ts\"; & 'C:\Java\apache-jmeter-5.6.3\bin\jmeter.bat' -n -t 'docs\jmeter\seckill-submit-duration.jmx' -l $jtl -e -o $report '-Jhost=127.0.0.1' '-Jport=8105' '-JactivityId=1' '-JskuId=1001' '-Jthreads=40' '-Jramp=10' '-JdurationSeconds=60' '-JuserIdStart=4000000'; Write-Output \"JTL=$jtl`nREPORT=$report\""
+@'
+$ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+$jtl = "target\loadtest\stage3c-current\submit-$ts.jtl"
+$report = "target\loadtest\stage3c-current\report-$ts"
+& 'C:\Java\apache-jmeter-5.6.3\bin\jmeter.bat' -n -t 'docs\jmeter\seckill-submit-duration.jmx' -l $jtl -e -o $report '-Jhost=127.0.0.1' '-Jport=8105' '-JactivityId=1' '-JskuId=1001' '-Jthreads=40' '-Jramp=10' '-JdurationSeconds=60' '-JuserIdStart=4000000'
+Write-Output "JTL=$jtl"
+Write-Output "REPORT=$report"
+'@ | rtk proxy powershell -NoProfile -
 ```
 
 JMeter 结束后，先停轮询任务，再抓 after 快照：
 
 ```powershell
-rtk proxy powershell -NoProfile -Command "$jobId = [int](Get-Content -Raw -Encoding UTF8 'target\loadtest\stage3c-current\last-metrics-job.txt'); Stop-Job -Id $jobId -ErrorAction SilentlyContinue; Receive-Job -Id $jobId -Keep | Out-String | Set-Content -Encoding UTF8 'target\loadtest\stage3c-current\last-metrics-job-output.txt'; Remove-Job -Id $jobId -Force -ErrorAction SilentlyContinue"
+@'
+$jobId = [int](Get-Content -Raw -Encoding UTF8 'target\loadtest\stage3c-current\last-metrics-job.txt')
+Stop-Job -Id $jobId -ErrorAction SilentlyContinue
+Receive-Job -Id $jobId -Keep | Out-String | Set-Content -Encoding UTF8 'target\loadtest\stage3c-current\last-metrics-job-output.txt'
+Remove-Job -Id $jobId -Force -ErrorAction SilentlyContinue
+'@ | rtk proxy powershell -NoProfile -
 ```
 
 ```powershell
@@ -299,7 +326,11 @@ rtk proxy powershell -NoProfile -Command "Import-Csv 'target\loadtest\stage3c-cu
 查看 Actuator 分段指标汇总：
 
 ```powershell
-rtk proxy powershell -NoProfile -Command "$metrics = (Get-Content -Raw -Encoding UTF8 'target\loadtest\stage3c-current\last-metrics-dir.txt').Trim(); $summary = Get-Content -Raw -Encoding UTF8 (Join-Path $metrics 'summary.json') | ConvertFrom-Json; $summary.metrics | Select-Object metric,countDelta,totalTimeDelta,avgMs,afterMaxMs | Format-Table -AutoSize"
+@'
+$metrics = (Get-Content -Raw -Encoding UTF8 'target\loadtest\stage3c-current\last-metrics-dir.txt').Trim()
+$summary = Get-Content -Raw -Encoding UTF8 (Join-Path $metrics 'summary.json') | ConvertFrom-Json
+$summary.metrics | Select-Object metric,countDelta,totalTimeDelta,avgMs,afterMaxMs | Format-Table -AutoSize
+'@ | rtk proxy powershell -NoProfile -
 ```
 
 下一轮重点先看：
