@@ -196,6 +196,83 @@ rtk proxy powershell -NoProfile -ExecutionPolicy Bypass -File "scripts/loadtest/
 - `Watch` 默认按 `2` 秒间隔轮询，`DurationSeconds=300` 覆盖当前 `60` 秒压测和收尾，长压测时要同步调大
 - `after` 快照会自动生成整轮 `summary.json`
 
+### 3.8 轻量回归压测 `50 x 20`
+
+当目标是快速确认当前代码改动有没有把秒杀入口或异步闭合打坏，而不是追高吞吐时，推荐先跑一轮固定请求数的轻量回归：
+
+- `50` 线程
+- 每线程 `20` 次
+- 总请求数 `1000`
+
+这轮压测建议直接复用 `3.2` 到 `3.5` 的 reset、重启和 smoke 流程，然后执行下面这组命令。
+
+先做一次 smoke：
+
+```powershell
+@'
+$rid = 'smoke-' + [guid]::NewGuid().ToString()
+$headers = @{ 'X-Request-Id' = $rid; 'X-User-Id' = '9000001' }
+Invoke-RestMethod -Method Post -Uri 'http://localhost:8105/api/seckill/1/1001' -Headers $headers | ConvertTo-Json -Depth 6
+'@ | rtk proxy powershell -NoProfile -
+```
+
+预期：
+
+- `code=0`
+- `data.status` 为 `PROCESSING`、`FAILED` 或 `SUCCESS`
+- 不能出现 HTTP 500
+
+再执行 JMeter 循环压测：
+
+```powershell
+@'
+$ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+$jtl = "target\loadtest\stage3c-current\submit-loops-$ts.jtl"
+$report = "target\loadtest\stage3c-current\report-loops-$ts"
+& 'C:\Java\apache-jmeter-5.6.3\bin\jmeter.bat' -n -t 'docs\jmeter\seckill-submit.jmx' -l $jtl -e -o $report '-Jhost=127.0.0.1' '-Jport=8105' '-JactivityId=1' '-JskuId=1001' '-Jthreads=50' '-Jloops=20' '-Jramp=10' '-JuserIdStart=5000000'
+Write-Output "JTL=$jtl"
+Write-Output "REPORT=$report"
+'@ | rtk proxy powershell -NoProfile -
+```
+
+这轮不强制要求开启 Actuator 轮询；它的目标是用最少操作先判断：
+
+- 入口是否还能稳定返回 `200`
+- JMeter 客户端是否还有连接复用问题
+- RabbitMQ 和订单闭合是否还能快速 drain
+
+JMeter 结束后，建议立刻检查：
+
+```powershell
+@'
+$jtl = 'target\loadtest\stage3c-current\submit-loops-<timestamp>.jtl'
+Import-Csv $jtl | Group-Object responseCode,success | Sort-Object Count -Descending | Select-Object Count,Name | Format-Table -AutoSize
+'@ | rtk proxy powershell -NoProfile -
+```
+
+```powershell
+rtk proxy powershell -NoProfile -Command "docker exec mall-rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers"
+```
+
+```powershell
+rtk proxy powershell -NoProfile -Command "docker exec mall-oceanbase-ce obclient -h 127.0.0.1 -P 2881 -u root@test -D mall -e 'SELECT status, COUNT(*) FROM seckill_result GROUP BY status; SELECT status, COUNT(*) FROM seckill_stock_snapshot GROUP BY status; SELECT status, COUNT(*) FROM seckill_stock_change_log GROUP BY status;'"
+```
+
+```powershell
+rtk proxy powershell -NoProfile -Command "docker exec mall-oceanbase-ce-shard1 obclient -h 127.0.0.1 -P 2881 -u root@test -D test -e 'SELECT status, COUNT(*) FROM seckill_stock_snapshot GROUP BY status; SELECT status, COUNT(*) FROM seckill_stock_change_log GROUP BY status;'"
+```
+
+```powershell
+rtk proxy powershell -NoProfile -Command "docker exec -e MYSQL_PWD=root mall-mysql mysql --default-character-set=utf8mb4 -uroot mall -e 'SELECT status, COUNT(*) FROM order_info GROUP BY status; SELECT COUNT(*) AS seckill_order_count FROM seckill_order; SELECT status, COUNT(*) FROM mq_message GROUP BY status;'"
+```
+
+正确口径：
+
+- `1000` 个压测请求应全部落到 `200`
+- RabbitMQ 相关队列应回落到 `ready=0`、`unacked=0`
+- `seckill_result.SUCCESS`、两个分片合计 `snapshot.CONFIRMED`、两个分片合计 `change_log.APPLIED`、`seckill_order_count` 应基本对齐
+- 如果压测前做过 smoke，请把 smoke 的 `1` 条请求计入总量
+
 ## 4. 结果判读
 
 ### 4.1 先看 JTL
@@ -231,6 +308,13 @@ rtk proxy powershell -NoProfile -Command "$metrics = (Get-Content -Raw -Encoding
 - `seckill.submit.record.snapshot.insert`
 - `seckill.submit.record.bucket.change-log.insert`
 - `seckill.submit.record.bucket.route`
+
+轻量回归压测 `50 x 20` 的最低要求：
+
+- `1000` 请求全部为 `200, true`
+- JMeter 错误率 `0%`
+- 不出现 `Stock not enough`、`Duplicate purchase` 的批量异常
+- 队列和库表能在短时间内自行回落，不出现 `REGISTERED`、`NEW` 长时间堆积
 
 ### 4.2 再看异步闭合
 
@@ -277,6 +361,11 @@ rtk proxy powershell -NoProfile -Command "docker exec -e MYSQL_PWD=root mall-mys
   - JTL：`target/loadtest/stage3c-current/submit-20260710-115513.jtl`
   - 报表：`target/loadtest/stage3c-current/report-20260710-115513`
   - submit 统计：`23018` 请求，约 `383 req/s`，平均 `95ms`，JMeter 采样错误 `0%`
+- 一轮轻量回归结果示例：
+  - JTL：`target/loadtest/stage3c-current/submit-loops-20260711-112235.jtl`
+  - 报表：`target/loadtest/stage3c-current/report-loops-20260711-112235`
+  - submit 统计：`1000` 请求，约 `86.3 req/s`，平均 `145ms`，JMeter 采样错误 `0%`
+  - 全链路闭合：本轮压测前做过 `1` 次 smoke，因此最终 `seckill_result.SUCCESS=1001`、`seckill_order_count=1001`、两个分片合计 `snapshot.CONFIRMED=1001`、两个分片合计 `change_log.APPLIED=1001`
 
 但当前服务端仍存在闭合问题，压测时已经观察到：
 

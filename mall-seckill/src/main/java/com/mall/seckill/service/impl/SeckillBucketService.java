@@ -22,10 +22,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
@@ -204,7 +201,7 @@ public class SeckillBucketService {
     }
 
     public SelectedBucket selectBucket(Long activityId, Long skuId) {
-        return selectBucketWithTimer(activityId, skuId, Set.of());
+        return routeTimer.record(() -> selectBucketExcluding(activityId, skuId));
     }
 
     public BucketDeductOnlyResult deductOnly(Long activityId, Long skuId, int quantity) {
@@ -217,11 +214,7 @@ public class SeckillBucketService {
         return new BucketDeductOnlyResult(updated > 0, selectedBucket);
     }
 
-    private SelectedBucket selectBucketWithTimer(Long activityId, Long skuId, Set<Long> excludedBucketIds) {
-        return routeTimer.record(() -> selectBucketExcluding(activityId, skuId, excludedBucketIds));
-    }
-
-    private SelectedBucket selectBucketExcluding(Long activityId, Long skuId, Set<Long> excludedBucketIds) {
+    private SelectedBucket selectBucketExcluding(Long activityId, Long skuId) {
         SeckillBucketConfigEntity config = requireConfig(activityId, skuId);
         List<Integer> survivors = parseSurvivors(config.getSurvivorBuckets());
         if (survivors.isEmpty()) {
@@ -235,7 +228,7 @@ public class SeckillBucketService {
             }
             Long shardKey = shardRouter.bucketShardKey(bucketNo);
             SeckillStockBucketEntity bucket = bucketMapper.selectActiveBucketByShard(activityId, skuId, bucketNo, shardKey);
-            if (bucket != null && !excludedBucketIds.contains(bucket.getId())) {
+            if (bucket != null) {
                 Long bucketShardKey = bucket.getShardKey() == null ? shardKey : bucket.getShardKey();
                 recordShardHit(bucketShardKey);
                 return new SelectedBucket(
@@ -249,73 +242,42 @@ public class SeckillBucketService {
         throw new SeckillStockNotEnoughException();
     }
 
-    public BucketMutationResult deduct(SelectedBucket selectedBucket,
-                                       String requestId,
-                                       Long activityId,
-                                       Long skuId,
-                                       int quantity) {
-        SelectedBucket currentBucket = selectedBucket;
-        Set<Long> exhaustedBucketIds = new LinkedHashSet<>();
-        Set<Long> transferTargetBucketIds = new LinkedHashSet<>();
-        int transferAttempts = 0;
-        while (true) {
-            SelectedBucket bucketToDeduct = currentBucket;
-            int updated = dbDeductTimer.record(() ->
-                    bucketMapper.deductSaleableAndIncreaseVersionByShard(
-                            bucketToDeduct.bucketId(),
-                            bucketToDeduct.bucketShardKey(),
-                            quantity));
-            if (updated > 0) {
-                return afterDeducted(bucketToDeduct, requestId, activityId, skuId, quantity);
-            }
-            exhaustedBucketIds.add(bucketToDeduct.bucketId());
-            SeckillStockBucketEntity exhaustedBucket = markBucketEmptyIfExhausted(activityId, skuId,
-                    bucketToDeduct.bucketId(), bucketToDeduct.bucketShardKey());
-            if (transferAttempts < maxTransferAttempts()
-                    && transferTargetBucketIds.add(bucketToDeduct.bucketId())
-                    && shouldAttemptRequestTransfer(activityId, skuId, bucketToDeduct.bucketId())) {
-                transferAttempts++;
-                if (tryTransfer(requestId, activityId, skuId, exhaustedBucket)) {
-                    continue;
-                }
-            }
-            currentBucket = selectBucketWithTimer(activityId, skuId, exhaustedBucketIds);
-        }
-    }
-
-    public BucketMutationResult deductSelected(SelectedBucket selectedBucket,
-                                               String requestId,
-                                               Long activityId,
-                                               Long skuId,
-                                               int quantity) {
-        if (deductSelectedBucket(selectedBucket, quantity)) {
-            return afterDeducted(selectedBucket, requestId, activityId, skuId, quantity);
+    public BucketMutationResult deductSelectedAndRecordChangeLog(SelectedBucket selectedBucket,
+                                                                 String requestId,
+                                                                 Long activityId,
+                                                                 Long skuId,
+                                                                 int quantity) {
+        SeckillStockChangeLogEntity changeLog = deductSelectedBucketAndRecordChangeLog(selectedBucket, requestId, activityId, skuId, quantity);
+        if (changeLog != null) {
+            return new BucketMutationResult(hotPathStockVersion(activityId, skuId), changeLog.getId(), selectedBucket);
         }
         SeckillStockBucketEntity exhaustedBucket = markBucketEmptyIfExhausted(activityId, skuId,
                 selectedBucket.bucketId(), selectedBucket.bucketShardKey());
         if (maxTransferAttempts() > 0
                 && shouldAttemptRequestTransfer(activityId, skuId, selectedBucket.bucketId())
-                && tryTransfer(requestId, activityId, skuId, exhaustedBucket)
-                && deductSelectedBucket(selectedBucket, quantity)) {
-            return afterDeducted(selectedBucket, requestId, activityId, skuId, quantity);
+                && tryTransfer(requestId, activityId, skuId, exhaustedBucket)) {
+            changeLog = deductSelectedBucketAndRecordChangeLog(selectedBucket, requestId, activityId, skuId, quantity);
+            if (changeLog != null) {
+                return new BucketMutationResult(hotPathStockVersion(activityId, skuId), changeLog.getId(), selectedBucket);
+            }
         }
         markBucketEmptyIfExhausted(activityId, skuId, selectedBucket.bucketId(), selectedBucket.bucketShardKey());
         throw new SeckillStockNotEnoughException();
     }
 
-    private boolean deductSelectedBucket(SelectedBucket selectedBucket, int quantity) {
-        return dbDeductTimer.record(() ->
+    private SeckillStockChangeLogEntity deductSelectedBucketAndRecordChangeLog(SelectedBucket selectedBucket,
+                                                                               String requestId,
+                                                                               Long activityId,
+                                                                               Long skuId,
+                                                                               int quantity) {
+        int updated = dbDeductTimer.record(() ->
                 bucketMapper.deductSaleableAndIncreaseVersionByShard(
                         selectedBucket.bucketId(),
                         selectedBucket.bucketShardKey(),
-                        quantity)) > 0;
-    }
-
-    private BucketMutationResult afterDeducted(SelectedBucket selectedBucket,
-                                               String requestId,
-                                               Long activityId,
-                                               Long skuId,
-                                               int quantity) {
+                        quantity));
+        if (updated <= 0) {
+            return null;
+        }
         SeckillStockChangeLogEntity changeLog = changeLog(
                 requestId,
                 activityId,
@@ -328,7 +290,7 @@ public class SeckillBucketService {
                 AFTER_QUANTITY_UNKNOWN);
         changeLogInsertTimer.record(() -> changeLogMapper.insert(changeLog));
         publishDeductCommitted(requestId, selectedBucket.bucketShardKey());
-        return new BucketMutationResult(hotPathStockVersion(activityId, skuId), changeLog.getId(), selectedBucket);
+        return changeLog;
     }
 
     private void publishDeductCommitted(String requestId, Long bucketShardKey) {
@@ -584,14 +546,6 @@ public class SeckillBucketService {
             survivors.add(Integer.valueOf(part.trim()));
         }
         return survivors;
-    }
-
-    private String formatSurvivors(List<Integer> survivors) {
-        return survivors.stream()
-                .sorted(Comparator.naturalOrder())
-                .map(String::valueOf)
-                .reduce((left, right) -> left + "," + right)
-                .orElse("");
     }
 
     public record SelectedBucket(Long bucketId,

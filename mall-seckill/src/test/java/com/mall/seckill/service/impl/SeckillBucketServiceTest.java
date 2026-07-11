@@ -109,12 +109,12 @@ class SeckillBucketServiceTest {
 
     @Test
     void shouldDeductBucketWriteChangeLogWithoutPostDeductBucketRead() {
-        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 3L, 7L, 1L);
         StockVersion aggregate = new StockVersion(8, 4L);
         when(bucketMapper.deductSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(1);
         when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
 
-        SeckillBucketService.BucketMutationResult result = service.deduct(selected, "r1", 1L, 1001L, 1);
+        SeckillBucketService.BucketMutationResult result = service.deductSelectedAndRecordChangeLog(selected, "r1", 1L, 1001L, 1);
 
         assertThat(result.stockVersion()).isEqualTo(aggregate);
         ArgumentCaptor<SeckillStockChangeLogEntity> changeCaptor = ArgumentCaptor.forClass(SeckillStockChangeLogEntity.class);
@@ -135,63 +135,10 @@ class SeckillBucketServiceTest {
     }
 
     @Test
-    void shouldRetryAnotherBucketWhenSelectedBucketWasConcurrentlyEmptied() {
-        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        SeckillStockBucketEntity emptyBucket = bucket(99L, 3, 0);
-        SeckillStockBucketEntity nextBucket = bucket(100L, 4, 9);
-        StockVersion aggregate = new StockVersion(9, 5L);
-        when(bucketMapper.deductSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(0);
-        when(bucketMapper.selectByIdAndShardKey(99L, 3L)).thenReturn(emptyBucket);
-        when(bucketMapper.markEmptyIfNoSaleableByShard(99L, 3L)).thenReturn(1);
-        when(configMapper.selectEnabled(1L, 1001L)).thenReturn(config("4"));
-        when(bucketMapper.selectActiveBucketByShard(1L, 1001L, 4, 4L)).thenReturn(nextBucket);
-        when(bucketMapper.deductSaleableAndIncreaseVersionByShard(100L, 4L, 1)).thenReturn(1);
-        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
-
-        SeckillBucketService.BucketMutationResult result = service.deduct(selected, "r1", 1L, 1001L, 1);
-
-        assertThat(result.stockVersion()).isEqualTo(aggregate);
-        assertThat(result.selectedBucket().bucketId()).isEqualTo(100L);
-        assertThat(result.selectedBucket().bucketNo()).isEqualTo(4);
-        assertThat(result.selectedBucket().bucketShardKey()).isEqualTo(4L);
-        verify(bucketMapper).markEmptyIfNoSaleableByShard(99L, 3L);
-        verify(availabilityCoordinator).signalPossiblyEmpty(1L, 1001L, 99L, 3, 3L);
-        verify(configMapper, never()).removeSurvivorBucket(1L, 1001L, 3);
-        verify(bucketMapper).deductSaleableAndIncreaseVersionByShard(99L, 3L, 1);
-        verify(bucketMapper).deductSaleableAndIncreaseVersionByShard(100L, 4L, 1);
-    }
-
-    @Test
-    void shouldRetryTargetBucketAfterSuccessfulTransfer() {
-        service = new SeckillBucketService(configMapper, bucketMapper, changeLogMapper, transferService, properties,
-                availabilityCoordinator);
-        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        SeckillStockBucketEntity emptyBucket = bucket(99L, 3, 0);
-        StockVersion aggregate = new StockVersion(7, 6L);
-        when(bucketMapper.deductSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(0, 1);
-        when(bucketMapper.selectByIdAndShardKey(99L, 3L)).thenReturn(emptyBucket);
-        when(bucketMapper.markEmptyIfNoSaleableByShard(99L, 3L)).thenReturn(1);
-        when(transferService.maxAttempts()).thenReturn(1);
-        when(transferService.transfer("r1", 1L, 1001L, emptyBucket))
-                .thenReturn(new SeckillBucketTransferService.TransferResult(true, 8));
-        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
-
-        SeckillBucketService.BucketMutationResult result = service.deduct(selected, "r1", 1L, 1001L, 1);
-
-        assertThat(result.stockVersion()).isEqualTo(aggregate);
-        assertThat(result.selectedBucket().bucketId()).isEqualTo(99L);
-        assertThat(result.selectedBucket().bucketNo()).isEqualTo(3);
-        verify(bucketMapper, org.mockito.Mockito.times(2)).deductSaleableAndIncreaseVersionByShard(99L, 3L, 1);
-        verify(transferService).transfer("r1", 1L, 1001L, emptyBucket);
-        verify(availabilityCoordinator).signalPossiblyEmpty(1L, 1001L, 99L, 3, 3L);
-        verify(configMapper, never()).removeSurvivorBucket(1L, 1001L, 3);
-    }
-
-    @Test
     void deductSelectedShouldRetryAttachedBucketAfterSuccessfulTransfer() {
         service = new SeckillBucketService(configMapper, bucketMapper, changeLogMapper, transferService, properties,
                 availabilityCoordinator);
-        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 3L, 7L, 1L);
         SeckillStockBucketEntity emptyBucket = bucket(99L, 3, 0);
         StockVersion aggregate = new StockVersion(7, 6L);
         when(bucketMapper.deductSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(0, 1);
@@ -202,7 +149,7 @@ class SeckillBucketServiceTest {
                 .thenReturn(new SeckillBucketTransferService.TransferResult(true, 8));
         when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
 
-        SeckillBucketService.BucketMutationResult result = service.deductSelected(selected, "r1", 1L, 1001L, 1);
+        SeckillBucketService.BucketMutationResult result = service.deductSelectedAndRecordChangeLog(selected, "r1", 1L, 1001L, 1);
 
         assertThat(result.stockVersion()).isEqualTo(aggregate);
         assertThat(result.selectedBucket()).isEqualTo(selected);
@@ -215,10 +162,10 @@ class SeckillBucketServiceTest {
     @Test
     void shouldSkipAggregateReadOnDeductHotPathWhenDisabled() {
         properties.getBucket().setHotPathAggregateRead(false);
-        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 3L, 7L, 1L);
         when(bucketMapper.deductSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(1);
 
-        SeckillBucketService.BucketMutationResult result = service.deduct(selected, "r1", 1L, 1001L, 1);
+        SeckillBucketService.BucketMutationResult result = service.deductSelectedAndRecordChangeLog(selected, "r1", 1L, 1001L, 1);
 
         assertThat(result.stockVersion()).isNull();
         verify(bucketMapper, never()).selectByIdAndShardKey(99L, 3L);
@@ -237,21 +184,19 @@ class SeckillBucketServiceTest {
                 transferService,
                 properties,
                 now::get);
-        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 3L, 7L, 1L);
         SeckillStockBucketEntity emptyBucket = bucket(99L, 3, 0);
-        SeckillStockBucketEntity nextBucket = bucket(100L, 4, 9);
         when(bucketMapper.deductSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(0, 0);
         when(bucketMapper.selectByIdAndShardKey(99L, 3L)).thenReturn(emptyBucket, emptyBucket);
         when(bucketMapper.markEmptyIfNoSaleableByShard(99L, 3L)).thenReturn(1, 1);
         when(transferService.maxAttempts()).thenReturn(1);
         when(transferService.transfer("r1", 1L, 1001L, emptyBucket))
                 .thenReturn(new SeckillBucketTransferService.TransferResult(false, 0));
-        when(configMapper.selectEnabled(1L, 1001L)).thenReturn(config("4"), config("4"));
-        when(bucketMapper.selectActiveBucketByShard(1L, 1001L, 4, 4L)).thenReturn(nextBucket, nextBucket);
-        when(bucketMapper.deductSaleableAndIncreaseVersionByShard(100L, 4L, 1)).thenReturn(1, 1);
 
-        service.deduct(selected, "r1", 1L, 1001L, 1);
-        service.deduct(selected, "r2", 1L, 1001L, 1);
+        assertThatThrownBy(() -> service.deductSelectedAndRecordChangeLog(selected, "r1", 1L, 1001L, 1))
+                .isInstanceOf(SeckillStockNotEnoughException.class);
+        assertThatThrownBy(() -> service.deductSelectedAndRecordChangeLog(selected, "r2", 1L, 1001L, 1))
+                .isInstanceOf(SeckillStockNotEnoughException.class);
 
         verify(transferService).transfer("r1", 1L, 1001L, emptyBucket);
         verify(transferService, never()).transfer("r2", 1L, 1001L, emptyBucket);
@@ -269,17 +214,15 @@ class SeckillBucketServiceTest {
                 (SeckillBucketTransferService) null,
                 properties,
                 now::get);
-        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 3L, 7L, 1L);
         SeckillStockBucketEntity emptyBucket = bucket(99L, 3, 0);
-        SeckillStockBucketEntity nextBucket = bucket(100L, 4, 9);
         when(bucketMapper.deductSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(0);
         when(bucketMapper.selectByIdAndShardKey(99L, 3L)).thenReturn(emptyBucket);
         when(bucketMapper.markEmptyIfNoSaleableByShard(99L, 3L)).thenReturn(1);
-        when(configMapper.selectEnabled(1L, 1001L)).thenReturn(config("4"), config("3"));
-        when(bucketMapper.selectActiveBucketByShard(1L, 1001L, 4, 4L)).thenReturn(nextBucket);
-        when(bucketMapper.deductSaleableAndIncreaseVersionByShard(100L, 4L, 1)).thenReturn(1);
+        when(configMapper.selectEnabled(1L, 1001L)).thenReturn(config("3"));
 
-        service.deduct(selected, "r1", 1L, 1001L, 1);
+        assertThatThrownBy(() -> service.deductSelectedAndRecordChangeLog(selected, "r1", 1L, 1001L, 1))
+                .isInstanceOf(SeckillStockNotEnoughException.class);
 
         assertThatThrownBy(() -> service.selectBucket(1L, 1001L))
                 .isInstanceOf(SeckillStockNotEnoughException.class);
@@ -288,22 +231,16 @@ class SeckillBucketServiceTest {
 
     @Test
     void shouldNotRemoveSurvivorWhenFailedDeductEmptyMarkLosesRace() {
-        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
+        SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 3L, 7L, 1L);
         SeckillStockBucketEntity emptyBucket = bucket(99L, 3, 0);
-        SeckillStockBucketEntity nextBucket = bucket(100L, 4, 9);
-        StockVersion aggregate = new StockVersion(8, 4L);
         when(bucketMapper.deductSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(0);
         when(bucketMapper.selectByIdAndShardKey(99L, 3L)).thenReturn(emptyBucket);
         when(bucketMapper.markEmptyIfNoSaleableByShard(99L, 3L)).thenReturn(0);
-        when(configMapper.selectEnabled(1L, 1001L)).thenReturn(config("4"));
-        when(bucketMapper.selectActiveBucketByShard(1L, 1001L, 4, 4L)).thenReturn(nextBucket);
-        when(bucketMapper.deductSaleableAndIncreaseVersionByShard(100L, 4L, 1)).thenReturn(1);
-        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
 
-        SeckillBucketService.BucketMutationResult result = service.deduct(selected, "r1", 1L, 1001L, 1);
+        assertThatThrownBy(() -> service.deductSelectedAndRecordChangeLog(selected, "r1", 1L, 1001L, 1))
+                .isInstanceOf(SeckillStockNotEnoughException.class);
 
-        assertThat(result.stockVersion()).isEqualTo(aggregate);
-        verify(bucketMapper).markEmptyIfNoSaleableByShard(99L, 3L);
+        verify(bucketMapper, org.mockito.Mockito.times(2)).markEmptyIfNoSaleableByShard(99L, 3L);
         verify(availabilityCoordinator, never()).signalPossiblyEmpty(
                 org.mockito.Mockito.anyLong(),
                 org.mockito.Mockito.anyLong(),

@@ -44,7 +44,6 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -88,144 +87,6 @@ class SeckillRepositoryTest {
     }
 
     @Test
-    void shouldRecordDeductionAndDeductOceanBaseStockInOneTransaction() {
-        when(snapshotMapper.selectCount(any())).thenReturn(0L);
-        when(skuMapper.deductStockAndIncreaseVersionById(10L, 1)).thenReturn(1);
-        when(skuMapper.selectStockVersionById(10L)).thenReturn(new StockVersion(49, 1L));
-
-        StockDeductionResult result = repository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1);
-
-        assertThat(result.code()).isZero();
-        assertThat(result.stockVersion()).isEqualTo(new StockVersion(49, 1L));
-        ArgumentCaptor<SeckillStockSnapshotEntity> snapshotCaptor = ArgumentCaptor.forClass(SeckillStockSnapshotEntity.class);
-        verify(snapshotMapper).insert(snapshotCaptor.capture());
-        SeckillStockSnapshotEntity inserted = snapshotCaptor.getValue();
-        assertThat(inserted.getRequestId()).isEqualTo("r1");
-        assertThat(inserted.getStockId()).isEqualTo(10L);
-        assertThat(inserted.getActivityId()).isEqualTo(1L);
-        assertThat(inserted.getSkuId()).isEqualTo(1001L);
-        assertThat(inserted.getUserId()).isEqualTo(101L);
-        assertThat(inserted.getActiveKey()).isEqualTo(101L);
-        assertThat(inserted.getQuantity()).isEqualTo(1);
-        assertThat(inserted.getStatus()).isEqualTo("DEDUCTED");
-        verify(skuMapper).deductStockAndIncreaseVersionById(10L, 1);
-        verify(skuMapper).selectStockVersionById(10L);
-        ArgumentCaptor<SeckillResultEntity> resultCaptor = ArgumentCaptor.forClass(SeckillResultEntity.class);
-        verify(resultMapper).insert(resultCaptor.capture());
-        assertThat(resultCaptor.getValue().getRequestId()).isEqualTo("r1");
-        assertThat(resultCaptor.getValue().getStatus()).isEqualTo("PROCESSING");
-    }
-
-    @Test
-    void shouldRunOutboxHookBeforeHotStockUpdate() {
-        Runnable beforeStockUpdate = mock(Runnable.class);
-        when(snapshotMapper.selectCount(any())).thenReturn(0L);
-        when(skuMapper.deductStockAndIncreaseVersionById(10L, 1)).thenReturn(1);
-        when(skuMapper.selectStockVersionById(10L)).thenReturn(new StockVersion(49, 1L));
-
-        repository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1, beforeStockUpdate);
-
-        InOrder order = inOrder(snapshotMapper, beforeStockUpdate, skuMapper);
-        order.verify(snapshotMapper).insert(any(SeckillStockSnapshotEntity.class));
-        order.verify(beforeStockUpdate).run();
-        order.verify(skuMapper).deductStockAndIncreaseVersionById(10L, 1);
-    }
-
-    @Test
-    void shouldReturnDuplicateWhenActiveDeductionExistsForActivityUser() {
-        when(snapshotMapper.selectCount(any())).thenReturn(1L);
-
-        StockDeductionResult result = repository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1);
-
-        assertThat(result.code()).isEqualTo(2);
-        verify(snapshotMapper, never()).insert(any(SeckillStockSnapshotEntity.class));
-        verify(skuMapper, never()).deductStockAndIncreaseVersionById(anyLong(), any());
-        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
-    }
-
-    @Test
-    void shouldReturnDuplicateWhenSnapshotUniqueKeyRejectsConcurrentInsert() {
-        when(snapshotMapper.selectCount(any())).thenReturn(0L);
-        when(snapshotMapper.insert(any(SeckillStockSnapshotEntity.class)))
-                .thenThrow(new DuplicateKeyException("duplicate active user"));
-
-        StockDeductionResult result = repository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1);
-
-        assertThat(result.code()).isEqualTo(2);
-        verify(skuMapper, never()).deductStockAndIncreaseVersionById(anyLong(), any());
-        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
-    }
-
-    @Test
-    void shouldThrowWhenStockNotEnoughAfterSnapshotInsert() {
-        when(snapshotMapper.selectCount(any())).thenReturn(0L);
-        when(skuMapper.deductStockAndIncreaseVersionById(10L, 1)).thenReturn(0);
-
-        assertThatThrownBy(() -> repository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1))
-                .isInstanceOf(SeckillStockNotEnoughException.class);
-
-        verify(snapshotMapper).insert(any(SeckillStockSnapshotEntity.class));
-        verify(skuMapper, never()).selectStockVersionById(anyLong());
-        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
-    }
-
-    @Test
-    void shouldRecordBucketDeductionWhenBucketModeEnabled() {
-        SeckillRepository bucketRepository = bucketRepository();
-        StockVersion stockVersion = new StockVersion(48, 8L);
-        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        when(snapshotMapper.selectCount(any())).thenReturn(0L);
-        when(bucketService.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(bucketService.deduct(selectedBucket, "r1", 1L, 1001L, 1))
-                .thenReturn(new SeckillBucketService.BucketMutationResult(stockVersion, 1000L, selectedBucket));
-        when(snapshotMapper.updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class))).thenReturn(1);
-
-        StockDeductionResult result = bucketRepository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1);
-
-        assertThat(result.code()).isZero();
-        assertThat(result.stockVersion()).isEqualTo(stockVersion);
-        ArgumentCaptor<SeckillStockSnapshotEntity> snapshotCaptor = ArgumentCaptor.forClass(SeckillStockSnapshotEntity.class);
-        verify(snapshotMapper).insert(snapshotCaptor.capture());
-        SeckillStockSnapshotEntity snapshot = snapshotCaptor.getValue();
-        assertThat(snapshot.getStockId()).isEqualTo(10L);
-        assertThat(snapshot.getBucketId()).isEqualTo(99L);
-        assertThat(snapshot.getBucketNo()).isEqualTo(3);
-        assertThat(snapshot.getBucketShardKey()).isEqualTo(3L);
-        assertThat(snapshot.getStrategyVersion()).isEqualTo(7L);
-        verify(bucketService).deduct(selectedBucket, "r1", 1L, 1001L, 1);
-        verify(snapshotMapper).updateBucketDeductionByRequestAndShardKey(snapshot);
-        verify(skuMapper, never()).deductStockAndIncreaseVersionById(anyLong(), any());
-        ArgumentCaptor<SeckillResultEntity> resultCaptor = ArgumentCaptor.forClass(SeckillResultEntity.class);
-        verify(resultMapper).insert(resultCaptor.capture());
-        assertThat(resultCaptor.getValue().getStatus()).isEqualTo("PROCESSING");
-    }
-
-    @Test
-    void shouldUpdateBucketSnapshotToActualDeductedBucketWhenRetryMovesBucket() {
-        SeckillRepository bucketRepository = bucketRepository();
-        StockVersion stockVersion = new StockVersion(48, 8L);
-        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        SeckillBucketService.SelectedBucket actualBucket = new SeckillBucketService.SelectedBucket(100L, 4, 7L, 1L);
-        when(snapshotMapper.selectCount(any())).thenReturn(0L);
-        when(bucketService.selectBucket(1L, 1001L)).thenReturn(selectedBucket);
-        when(bucketService.deduct(selectedBucket, "r1", 1L, 1001L, 1))
-                .thenReturn(new SeckillBucketService.BucketMutationResult(stockVersion, 1000L, actualBucket));
-        when(snapshotMapper.updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class))).thenReturn(1);
-
-        StockDeductionResult result = bucketRepository.recordDeduction("r1", 10L, 1L, 1001L, 101L, 1);
-
-        assertThat(result.code()).isZero();
-        ArgumentCaptor<SeckillStockSnapshotEntity> updateCaptor = ArgumentCaptor.forClass(SeckillStockSnapshotEntity.class);
-        verify(snapshotMapper).updateBucketDeductionByRequestAndShardKey(updateCaptor.capture());
-        SeckillStockSnapshotEntity updated = updateCaptor.getValue();
-        assertThat(updated.getBucketId()).isEqualTo(100L);
-        assertThat(updated.getBucketNo()).isEqualTo(4);
-        assertThat(updated.getBucketShardKey()).isEqualTo(4L);
-        assertThat(updated.getStrategyVersion()).isEqualTo(7L);
-        assertThat(updated.getChangeId()).isEqualTo(1000L);
-    }
-
-    @Test
     void shouldRegisterBucketSnapshotAsRegisteredWithoutDeductingOrSavingResult() {
         SeckillRepository bucketRepository = bucketRepository();
         SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
@@ -242,15 +103,16 @@ class SeckillRepositoryTest {
         assertThat(snapshot.getBucketId()).isEqualTo(99L);
         assertThat(snapshot.getBucketShardKey()).isEqualTo(3L);
         assertThat(snapshot.getStatus()).isEqualTo("REGISTERED");
-        verify(bucketService, never()).deduct(any(), any(), any(), any(), anyInt());
-        verify(bucketService, never()).deductSelected(any(), any(), any(), any(), anyInt());
+        verify(bucketService, never()).deductSelectedAndRecordChangeLog(any(), any(), any(), any(), anyInt());
         verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
     }
 
     @Test
-    void shouldReportRequestDuplicateWhenSnapshotRequestAlreadyExists() {
+    void shouldReportRequestDuplicateWhenSnapshotInsertRejectsExistingRequest() {
         SeckillRepository bucketRepository = bucketRepository();
         SeckillStockSnapshotEntity existing = snapshot("r1", "REGISTERED", 1);
+        when(snapshotMapper.insert(any(SeckillStockSnapshotEntity.class)))
+                .thenThrow(new DuplicateKeyException("duplicate request"));
         when(snapshotMapper.selectById("r1")).thenReturn(existing);
 
         SeckillRepository.SnapshotRegistration registration = bucketRepository.registerBucketSnapshot(
@@ -258,7 +120,7 @@ class SeckillRepositoryTest {
 
         assertThat(registration.outcome()).isEqualTo(SeckillRepository.SnapshotRegistrationOutcome.REQUEST_DUPLICATE);
         assertThat(registration.snapshot()).isNotNull();
-        verify(snapshotMapper, never()).insert(any(SeckillStockSnapshotEntity.class));
+        verify(snapshotMapper).insert(any(SeckillStockSnapshotEntity.class));
     }
 
     @Test
@@ -281,30 +143,14 @@ class SeckillRepositoryTest {
         SeckillRepository bucketRepository = bucketRepository();
         StockVersion stockVersion = new StockVersion(48, 8L);
         SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(0L);
-        when(bucketService.deductSelected(selectedBucket, "r1", 1L, 1001L, 1))
+        when(bucketService.deductSelectedAndRecordChangeLog(selectedBucket, "r1", 1L, 1001L, 1))
                 .thenReturn(new SeckillBucketService.BucketMutationResult(stockVersion, 1000L, selectedBucket));
 
         StockDeductionResult result = bucketRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
 
         assertThat(result.code()).isZero();
         assertThat(result.stockVersion()).isEqualTo(stockVersion);
-        verify(changeLogMapper).countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L);
-        verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
-        verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
-    }
-
-    @Test
-    void shouldSkipBucketDeductionWhenDeductFactAlreadyExists() {
-        SeckillRepository bucketRepository = bucketRepository();
-        SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(1L);
-
-        StockDeductionResult result = bucketRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
-
-        assertThat(result.code()).isEqualTo(2);
-        verify(changeLogMapper).countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L);
-        verify(bucketService, never()).deductSelected(any(), any(), any(), any(), anyInt());
+        verify(changeLogMapper, never()).countByRequestIdAndChangeTypeAndBucketShardKey(any(), any(), any());
         verify(snapshotMapper, never()).updateBucketDeductionByRequestAndShardKey(any(SeckillStockSnapshotEntity.class));
         verify(resultMapper, never()).insert(any(SeckillResultEntity.class));
     }
@@ -315,8 +161,7 @@ class SeckillRepositoryTest {
         RecordingTransactionManager transactionManager = new RecordingTransactionManager();
         SeckillRepository transactionalRepository = transactionalProxy(bucketRepository, transactionManager);
         SeckillBucketService.SelectedBucket selectedBucket = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
-        when(changeLogMapper.countByRequestIdAndChangeTypeAndBucketShardKey("r1", "DEDUCT", 3L)).thenReturn(0L);
-        when(bucketService.deductSelected(selectedBucket, "r1", 1L, 1001L, 1))
+        when(bucketService.deductSelectedAndRecordChangeLog(selectedBucket, "r1", 1L, 1001L, 1))
                 .thenThrow(new DuplicateKeyException("duplicate deduct fact"));
 
         StockDeductionResult result = transactionalRepository.recordBucketDeductionFact("r1", 1L, 1001L, selectedBucket, 1);
