@@ -11,7 +11,6 @@ public class SeckillProperties {
     private long metadataCacheTtlMillis = 1000;
     private Lock lock = new Lock();
     private StockCache stockCache = new StockCache();
-    private ReservationGuard reservationGuard = new ReservationGuard();
     private EntryGuard entryGuard = new EntryGuard();
     private OrderOutbox orderOutbox = new OrderOutbox();
     private SnapshotRepair snapshotRepair = new SnapshotRepair();
@@ -50,14 +49,6 @@ public class SeckillProperties {
 
     public void setStockCache(StockCache stockCache) {
         this.stockCache = stockCache;
-    }
-
-    public ReservationGuard getReservationGuard() {
-        return reservationGuard;
-    }
-
-    public void setReservationGuard(ReservationGuard reservationGuard) {
-        this.reservationGuard = reservationGuard;
     }
 
     public EntryGuard getEntryGuard() {
@@ -218,55 +209,6 @@ public class SeckillProperties {
         }
     }
 
-    public static class ReservationGuard {
-
-        private boolean enabled = false;
-        private long processingProbeAfterSeconds = 30;
-        private long safeReleaseAfterSeconds = 300;
-        private int repairBatchSize = 100;
-        private long repairFixedDelay = 60000;
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public long getProcessingProbeAfterSeconds() {
-            return processingProbeAfterSeconds;
-        }
-
-        public void setProcessingProbeAfterSeconds(long processingProbeAfterSeconds) {
-            this.processingProbeAfterSeconds = processingProbeAfterSeconds;
-        }
-
-        public long getSafeReleaseAfterSeconds() {
-            return safeReleaseAfterSeconds;
-        }
-
-        public void setSafeReleaseAfterSeconds(long safeReleaseAfterSeconds) {
-            this.safeReleaseAfterSeconds = safeReleaseAfterSeconds;
-        }
-
-        public int getRepairBatchSize() {
-            return repairBatchSize;
-        }
-
-        public void setRepairBatchSize(int repairBatchSize) {
-            this.repairBatchSize = repairBatchSize;
-        }
-
-        public long getRepairFixedDelay() {
-            return repairFixedDelay;
-        }
-
-        public void setRepairFixedDelay(long repairFixedDelay) {
-            this.repairFixedDelay = repairFixedDelay;
-        }
-    }
-
     public static class EntryGuard {
 
         private boolean enabled = false;
@@ -311,7 +253,15 @@ public class SeckillProperties {
 
         private boolean enabled = false;
         private long fixedDelay = 1000;
-        private int batchSize = 500;
+        private int batchSize = 200;
+        private int workerCorePoolSize = 4;
+        private int workerMaxPoolSize = 8;
+        private int workerQueueCapacity = 64;
+        private int maxBatchesPerRun = 5;
+        private long claimTimeoutSeconds = 5;
+        private long recoveryFixedDelay = 1000;
+        private long messageRetryFixedDelay = 1000;
+        private long messageDispatchTimeoutSeconds = 5;
 
         public boolean isEnabled() {
             return enabled;
@@ -335,6 +285,70 @@ public class SeckillProperties {
 
         public void setBatchSize(int batchSize) {
             this.batchSize = batchSize;
+        }
+
+        public int getWorkerCorePoolSize() {
+            return workerCorePoolSize;
+        }
+
+        public void setWorkerCorePoolSize(int workerCorePoolSize) {
+            this.workerCorePoolSize = workerCorePoolSize;
+        }
+
+        public int getWorkerMaxPoolSize() {
+            return workerMaxPoolSize;
+        }
+
+        public void setWorkerMaxPoolSize(int workerMaxPoolSize) {
+            this.workerMaxPoolSize = workerMaxPoolSize;
+        }
+
+        public int getWorkerQueueCapacity() {
+            return workerQueueCapacity;
+        }
+
+        public void setWorkerQueueCapacity(int workerQueueCapacity) {
+            this.workerQueueCapacity = workerQueueCapacity;
+        }
+
+        public int getMaxBatchesPerRun() {
+            return maxBatchesPerRun;
+        }
+
+        public void setMaxBatchesPerRun(int maxBatchesPerRun) {
+            this.maxBatchesPerRun = maxBatchesPerRun;
+        }
+
+        public long getClaimTimeoutSeconds() {
+            return claimTimeoutSeconds;
+        }
+
+        public void setClaimTimeoutSeconds(long claimTimeoutSeconds) {
+            this.claimTimeoutSeconds = claimTimeoutSeconds;
+        }
+
+        public long getRecoveryFixedDelay() {
+            return recoveryFixedDelay;
+        }
+
+        public void setRecoveryFixedDelay(long recoveryFixedDelay) {
+            this.recoveryFixedDelay = recoveryFixedDelay;
+        }
+
+        public long getMessageRetryFixedDelay() {
+            return messageRetryFixedDelay;
+        }
+
+        public void setMessageRetryFixedDelay(long messageRetryFixedDelay) {
+            this.messageRetryFixedDelay = messageRetryFixedDelay;
+        }
+
+        public long getMessageDispatchTimeoutSeconds() {
+            return messageDispatchTimeoutSeconds;
+        }
+
+        public void setMessageDispatchTimeoutSeconds(long messageDispatchTimeoutSeconds) {
+            this.messageDispatchTimeoutSeconds = messageDispatchTimeoutSeconds;
         }
     }
 

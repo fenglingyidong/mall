@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
 @Repository
@@ -22,18 +23,16 @@ public class ReliableMessageRepository {
     }
 
     public void save(ReliableMessage message) {
-        MqMessageEntity entity = new MqMessageEntity();
-        entity.setMessageId(message.messageId());
-        entity.setExchangeName(message.exchange());
-        entity.setRoutingKey(message.routingKey());
-        entity.setBusinessKey(message.businessKey());
-        entity.setPayload(message.payload());
-        entity.setBucketShardKey(message.bucketShardKey());
-        entity.setDelayMillis(message.delayMillis());
-        entity.setStatus(MessageStatus.NEW.name());
-        entity.setCreatedAt(LocalDateTime.now());
-        entity.setUpdatedAt(LocalDateTime.now());
-        messageMapper.insert(entity);
+        messageMapper.insert(newEntity(message));
+    }
+
+    public void saveIgnoreDuplicates(List<ReliableMessage> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return;
+        }
+        messageMapper.insertIgnoreBatch(messages.stream()
+                .map(this::newEntity)
+                .toList());
     }
 
     public boolean markDispatching(String messageId) {
@@ -106,6 +105,25 @@ public class ReliableMessageRepository {
         return messageMapper.update(null, wrapper);
     }
 
+    public int markDispatchingTimedOut(Instant timeoutBefore, Long bucketShardKey, String routingKey, int limit) {
+        int safeLimit = Math.max(1, limit);
+        var wrapper = Wrappers.<MqMessageEntity>lambdaUpdate()
+                .eq(MqMessageEntity::getStatus, MessageStatus.DISPATCHING.name())
+                .eq(MqMessageEntity::getRoutingKey, routingKey)
+                .lt(MqMessageEntity::getUpdatedAt, toLocalDateTime(timeoutBefore))
+                .set(MqMessageEntity::getStatus, MessageStatus.FAILED.name())
+                .set(MqMessageEntity::getErrorType, MessageErrorType.TIMEOUT.name())
+                .set(MqMessageEntity::getErrorMessage, "Reliable message dispatch timeout")
+                .set(MqMessageEntity::getUpdatedAt, LocalDateTime.now())
+                .last("LIMIT " + safeLimit);
+        if (bucketShardKey == null) {
+            wrapper.isNull(MqMessageEntity::getBucketShardKey);
+        } else {
+            wrapper.eq(MqMessageEntity::getBucketShardKey, bucketShardKey);
+        }
+        return messageMapper.update(null, wrapper);
+    }
+
     public void markConsumed(String messageId) {
         update(messageId, MessageStatus.CONSUMED, null);
     }
@@ -168,6 +186,25 @@ public class ReliableMessageRepository {
                 .toList();
     }
 
+    public List<ReliableMessage> findNeedCompensation(Long bucketShardKey, String routingKey, int limit) {
+        if (routingKey == null || routingKey.isBlank()) {
+            return Collections.emptyList();
+        }
+        var wrapper = Wrappers.<MqMessageEntity>lambdaQuery()
+                .eq(MqMessageEntity::getRoutingKey, routingKey)
+                .in(MqMessageEntity::getStatus, MessageStatus.NEW.name(), MessageStatus.FAILED.name())
+                .orderByAsc(MqMessageEntity::getUpdatedAt)
+                .last("LIMIT " + Math.max(1, limit));
+        if (bucketShardKey == null) {
+            wrapper.isNull(MqMessageEntity::getBucketShardKey);
+        } else {
+            wrapper.eq(MqMessageEntity::getBucketShardKey, bucketShardKey);
+        }
+        return messageMapper.selectList(wrapper).stream()
+                .map(this::toMessage)
+                .toList();
+    }
+
     private void update(String messageId, MessageStatus status, String error) {
         messageMapper.update(null, Wrappers.<MqMessageEntity>update()
                 .eq("message_id", messageId)
@@ -221,6 +258,22 @@ public class ReliableMessageRepository {
                 entity.getDelayMillis(),
                 toInstant(entity.getCreatedAt())
         );
+    }
+
+    private MqMessageEntity newEntity(ReliableMessage message) {
+        LocalDateTime now = LocalDateTime.now();
+        MqMessageEntity entity = new MqMessageEntity();
+        entity.setMessageId(message.messageId());
+        entity.setExchangeName(message.exchange());
+        entity.setRoutingKey(message.routingKey());
+        entity.setBusinessKey(message.businessKey());
+        entity.setPayload(message.payload());
+        entity.setBucketShardKey(message.bucketShardKey());
+        entity.setDelayMillis(message.delayMillis());
+        entity.setStatus(MessageStatus.NEW.name());
+        entity.setCreatedAt(now);
+        entity.setUpdatedAt(now);
+        return entity;
     }
 
     private Instant toInstant(LocalDateTime value) {

@@ -23,7 +23,12 @@ import com.mall.order.pojo.vo.CartItemView;
 import com.mall.order.pojo.vo.ConfirmOrderResponse;
 import com.mall.order.pojo.vo.ProductSkuView;
 import com.mall.order.service.OrderService;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.seata.spring.annotation.GlobalTransactional;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -42,6 +47,14 @@ public class OrderServiceImpl implements OrderService {
     private final ConsumeRecordRepository consumeRecordRepository;
     private final OrderProperties properties;
     private final ObjectMapper objectMapper;
+    private final Timer seckillCreateTotalTimer;
+    private final Timer seckillCreateConsumeRecordTimer;
+    private final Timer seckillCreateDuplicateLookupTimer;
+    private final Timer seckillCreateExistingLookupTimer;
+    private final Timer seckillCreateBuildTimer;
+    private final Timer seckillCreateBindTimer;
+    private final Timer seckillCreateSaveTimer;
+    private final Timer seckillCreateResultEnqueueTimer;
 
     public OrderServiceImpl(CartClient cartClient,
                             ProductClient productClient,
@@ -50,6 +63,43 @@ public class OrderServiceImpl implements OrderService {
                             ConsumeRecordRepository consumeRecordRepository,
                             OrderProperties properties,
                             ObjectMapper objectMapper) {
+        this(cartClient,
+                productClient,
+                repository,
+                messagePublisher,
+                consumeRecordRepository,
+                properties,
+                objectMapper,
+                new SimpleMeterRegistry());
+    }
+
+    @Autowired
+    public OrderServiceImpl(CartClient cartClient,
+                            ProductClient productClient,
+                            OrderRepository repository,
+                            ReliableMessagePublisher messagePublisher,
+                            ConsumeRecordRepository consumeRecordRepository,
+                            OrderProperties properties,
+                            ObjectMapper objectMapper,
+                            ObjectProvider<MeterRegistry> meterRegistry) {
+        this(cartClient,
+                productClient,
+                repository,
+                messagePublisher,
+                consumeRecordRepository,
+                properties,
+                objectMapper,
+                meterRegistry.getIfAvailable(SimpleMeterRegistry::new));
+    }
+
+    private OrderServiceImpl(CartClient cartClient,
+                             ProductClient productClient,
+                             OrderRepository repository,
+                             ReliableMessagePublisher messagePublisher,
+                             ConsumeRecordRepository consumeRecordRepository,
+                             OrderProperties properties,
+                             ObjectMapper objectMapper,
+                             MeterRegistry meterRegistry) {
         this.cartClient = cartClient;
         this.productClient = productClient;
         this.repository = repository;
@@ -57,6 +107,23 @@ public class OrderServiceImpl implements OrderService {
         this.consumeRecordRepository = consumeRecordRepository;
         this.properties = properties;
         this.objectMapper = objectMapper;
+        MeterRegistry registry = meterRegistry == null ? new SimpleMeterRegistry() : meterRegistry;
+        this.seckillCreateTotalTimer = timer(registry, "mall.order.seckill.create.total",
+                "Total latency to create a seckill order");
+        this.seckillCreateConsumeRecordTimer = timer(registry, "mall.order.seckill.create.consume_record",
+                "Latency to record seckill message consumption");
+        this.seckillCreateDuplicateLookupTimer = timer(registry, "mall.order.seckill.create.duplicate_lookup",
+                "Latency to load an already consumed seckill order");
+        this.seckillCreateExistingLookupTimer = timer(registry, "mall.order.seckill.create.existing_lookup",
+                "Latency to check existing seckill order before creation");
+        this.seckillCreateBuildTimer = timer(registry, "mall.order.seckill.create.build",
+                "Latency to build the seckill order domain object");
+        this.seckillCreateBindTimer = timer(registry, "mall.order.seckill.create.bind",
+                "Latency to bind seckill reservation to order");
+        this.seckillCreateSaveTimer = timer(registry, "mall.order.seckill.create.save",
+                "Latency to persist seckill order");
+        this.seckillCreateResultEnqueueTimer = timer(registry, "mall.order.seckill.create.result_enqueue",
+                "Latency to enqueue seckill order result message");
     }
 
     @Override
@@ -115,7 +182,12 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public OrderInfo pay(String orderSn) {
+        OrderInfo current = repository.require(orderSn);
+        if (isExpiredSeckillOrder(current)) {
+            throw new BusinessException(409, "Order payment expired");
+        }
         return repository.transition(orderSn, OrderStatus.CREATED, OrderStatus.PAID);
     }
 
@@ -137,41 +209,56 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public OrderInfo createSeckillOrder(SeckillOrderRequest request) {
+        return seckillCreateTotalTimer.record(() -> doCreateSeckillOrder(request));
+    }
+
+    private OrderInfo doCreateSeckillOrder(SeckillOrderRequest request) {
         String reservationId = request.reservationId();
-        if (!consumeRecordRepository.markIfAbsent(reservationId)) {
-            return repository.findBySource("SECKILL", reservationId)
+        boolean firstConsume = seckillCreateConsumeRecordTimer.record(() ->
+                consumeRecordRepository.markIfAbsent(reservationId));
+        if (!firstConsume) {
+            return seckillCreateDuplicateLookupTimer.record(() -> repository.findBySource("SECKILL", reservationId))
                     .orElseThrow(() -> new BusinessException(409, "Seckill message already consumed"));
         }
-        return repository.findBySource("SECKILL", reservationId).orElseGet(() -> {
-            List<OrderItem> items = List.of(new OrderItem(
-                    request.skuId(),
-                    request.skuName(),
-                    request.price(),
-                    request.quantity(),
-                    request.price().multiply(BigDecimal.valueOf(request.quantity()))
-            ));
-            OrderInfo order = new OrderInfo(
-                    OrderNoGenerator.next("S"),
-                    request.userId(),
-                    OrderStatus.CREATED,
-                    items.get(0).amount(),
-                    items,
-                    "SECKILL",
-                    reservationId,
-                    Instant.now(),
-                    Instant.now()
-            );
-            repository.bindSeckill(reservationId, request.activityId(), request.userId(), request.skuId(),
-                    order.orderSn(), request.bucketShardKey());
-            repository.save(order);
-            publishCloseMessage(order.orderSn());
-            enqueueSeckillOrderCreated(request, order.orderSn());
-            return order;
-        });
+        return seckillCreateExistingLookupTimer.record(() -> repository.findBySource("SECKILL", reservationId))
+                .orElseGet(() -> createNewSeckillOrder(request, reservationId));
+    }
+
+    private OrderInfo createNewSeckillOrder(SeckillOrderRequest request, String reservationId) {
+        OrderInfo order = seckillCreateBuildTimer.record(() -> buildSeckillOrder(request, reservationId));
+        seckillCreateBindTimer.record(() -> repository.bindSeckill(reservationId, request.activityId(),
+                request.userId(), request.skuId(), order.orderSn(), request.bucketShardKey()));
+        seckillCreateSaveTimer.record(() -> repository.save(order));
+        seckillCreateResultEnqueueTimer.record(() -> enqueueSeckillOrderCreated(request, order.orderSn()));
+        return order;
+    }
+
+    private OrderInfo buildSeckillOrder(SeckillOrderRequest request, String reservationId) {
+        Instant createdAt = Instant.now();
+        Instant payExpireAt = createdAt.plusSeconds(Math.max(1L, properties.getOrder().getCloseDelaySeconds()));
+        List<OrderItem> items = List.of(new OrderItem(
+                request.skuId(),
+                request.skuName(),
+                request.price(),
+                request.quantity(),
+                request.price().multiply(BigDecimal.valueOf(request.quantity()))
+        ));
+        return new OrderInfo(
+                OrderNoGenerator.next("S"),
+                request.userId(),
+                OrderStatus.CREATED,
+                items.get(0).amount(),
+                items,
+                "SECKILL",
+                reservationId,
+                payExpireAt,
+                createdAt,
+                createdAt
+        );
     }
 
     private void publishCloseMessage(String orderSn) {
-        messagePublisher.publishOrderCloseDelay(orderSn, properties.getOrder().getCloseDelaySeconds(), TimeUnit.SECONDS);
+        messagePublisher.enqueueOrderCloseDelay(orderSn, properties.getOrder().getCloseDelaySeconds(), TimeUnit.SECONDS);
     }
 
     private void releaseStock(OrderInfo order) {
@@ -187,6 +274,13 @@ public class OrderServiceImpl implements OrderService {
 
     private boolean isSeckillOrder(OrderInfo order) {
         return "SECKILL".equals(order.source());
+    }
+
+    private boolean isExpiredSeckillOrder(OrderInfo order) {
+        return isSeckillOrder(order)
+                && order.status() == OrderStatus.CREATED
+                && order.payExpireAt() != null
+                && Instant.now().isAfter(order.payExpireAt());
     }
 
     private void enqueueSeckillOrderCreated(SeckillOrderRequest request, String orderSn) {
@@ -219,5 +313,11 @@ public class OrderServiceImpl implements OrderService {
         if (response.code() != 0) {
             throw new BusinessException(response.code(), operation + " failed: " + response.message());
         }
+    }
+
+    private Timer timer(MeterRegistry registry, String name, String description) {
+        return Timer.builder(name)
+                .description(description)
+                .register(registry);
     }
 }

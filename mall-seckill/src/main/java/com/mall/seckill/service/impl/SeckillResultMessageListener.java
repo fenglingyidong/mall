@@ -8,7 +8,6 @@ import com.mall.message.SeckillOrderResultMessage;
 import com.mall.common.exception.BusinessException;
 import com.mall.seckill.cache.SeckillStockCache;
 import com.mall.seckill.config.SeckillProperties;
-import com.mall.seckill.mapper.ReservationGuardRepository;
 import com.mall.seckill.mapper.SeckillRepository;
 import com.mall.seckill.mapper.SeckillResultRetryRepository;
 import com.mall.seckill.pojo.vo.SeckillResult;
@@ -37,7 +36,6 @@ public class SeckillResultMessageListener {
     private final SeckillStockCache stockCache;
     private final ObjectMapper objectMapper;
     private final ReliableMessageRepository messageRepository;
-    private final ReservationGuardRepository guardRepository;
     private final SeckillResultRetryRepository retryRepository;
     private final ReliableMessagePublisher retryMessagePublisher;
     private final SeckillProperties properties;
@@ -50,7 +48,6 @@ public class SeckillResultMessageListener {
                 stockCache,
                 objectMapper,
                 messageRepository,
-                (ReservationGuardRepository) null,
                 (SeckillResultRetryRepository) null,
                 (ReliableMessagePublisher) null,
                 new SeckillProperties());
@@ -61,7 +58,6 @@ public class SeckillResultMessageListener {
                                         SeckillStockCache stockCache,
                                         ObjectMapper objectMapper,
                                         ReliableMessageRepository messageRepository,
-                                        ObjectProvider<ReservationGuardRepository> guardRepository,
                                         ObjectProvider<SeckillResultRetryRepository> retryRepository,
                                         ObjectProvider<ReliableMessagePublisher> retryMessagePublisher,
                                         SeckillProperties properties) {
@@ -69,7 +65,6 @@ public class SeckillResultMessageListener {
                 stockCache,
                 objectMapper,
                 messageRepository,
-                guardRepository.getIfAvailable(),
                 retryRepository.getIfAvailable(),
                 retryMessagePublisher.getIfAvailable(),
                 properties);
@@ -79,7 +74,6 @@ public class SeckillResultMessageListener {
                                          SeckillStockCache stockCache,
                                          ObjectMapper objectMapper,
                                          ReliableMessageRepository messageRepository,
-                                         ReservationGuardRepository guardRepository,
                                          SeckillResultRetryRepository retryRepository,
                                          ReliableMessagePublisher retryMessagePublisher,
                                          SeckillProperties properties) {
@@ -87,7 +81,6 @@ public class SeckillResultMessageListener {
         this.stockCache = stockCache;
         this.objectMapper = objectMapper;
         this.messageRepository = messageRepository;
-        this.guardRepository = guardRepository;
         this.retryRepository = retryRepository;
         this.retryMessagePublisher = retryMessagePublisher;
         this.properties = properties == null ? new SeckillProperties() : properties;
@@ -155,17 +148,6 @@ public class SeckillResultMessageListener {
                 "FAILED",
                 resultMessage.orderSn(),
                 reason));
-        if (guardRepository == null) {
-            return;
-        }
-        if ("SUCCESS".equals(resultMessage.status())) {
-            boolean markedFailed = guardRepository.markFailedIfProcessing(resultMessage.reservationId(), reason);
-            if (!markedFailed) {
-                guardRepository.markReleased(resultMessage.reservationId(), reason);
-            }
-        } else {
-            guardRepository.markReleased(resultMessage.reservationId(), reason);
-        }
     }
 
     private String retryExhaustedReason(Exception exception) {
@@ -188,9 +170,6 @@ public class SeckillResultMessageListener {
             }
             if (!"CONFIRMED".equals(snapshot.status())) {
                 throw new BusinessException(409, "Seckill deduction snapshot is not confirmable: " + snapshot.status());
-            }
-            if (guardRepository != null) {
-                guardRepository.markConfirmed(resultMessage.reservationId());
             }
             repository.saveResult(new SeckillResult(
                     resultMessage.requestId(),
@@ -220,9 +199,6 @@ public class SeckillResultMessageListener {
                 resultMessage.reservationId(),
                 "create failed result");
         if ("RELEASED".equals(snapshot.status())) {
-            if (guardRepository != null) {
-                guardRepository.markReleasedFromDeducted(resultMessage.reservationId(), resultMessage.message());
-            }
             stockCache.refresh(
                     snapshot.activityId(),
                     snapshot.skuId(),
@@ -253,9 +229,6 @@ public class SeckillResultMessageListener {
                 resultMessage.reservationId(),
                 "order closed result");
         if ("RELEASED".equals(snapshot.status())) {
-            if (guardRepository != null) {
-                guardRepository.markReleasedFromConfirmed(resultMessage.reservationId(), resultMessage.message());
-            }
             stockCache.refresh(
                     snapshot.activityId(),
                     snapshot.skuId(),

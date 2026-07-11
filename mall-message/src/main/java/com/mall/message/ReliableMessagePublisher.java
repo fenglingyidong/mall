@@ -19,7 +19,11 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
+import java.util.List;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 
 @Component
 public class ReliableMessagePublisher {
@@ -101,6 +105,28 @@ public class ReliableMessagePublisher {
                 businessKey, payload, bucketShardKey, null);
     }
 
+    public List<ReliableMessage> enqueueSeckillOrderCreateBatch(List<SeckillOrderCreateOutbox> outboxes) {
+        if (outboxes == null || outboxes.isEmpty()) {
+            return List.of();
+        }
+        return enqueueTimer.record(() -> {
+            List<ReliableMessage> messages = outboxes.stream()
+                    .map(item -> new ReliableMessage(
+                            stableSeckillOrderCreateMessageId(item),
+                            MessageNames.MALL_EXCHANGE,
+                            MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY,
+                            item.requestId(),
+                            item.payload(),
+                            item.bucketShardKey(),
+                            null,
+                            Instant.now()))
+                    .toList();
+            repository.saveIgnoreDuplicates(messages);
+            messages.forEach(this::dispatchAfterCommit);
+            return messages;
+        });
+    }
+
     public ReliableMessage publishSeckillOrderResult(String requestId, String payload) {
         return publish(MessageNames.MALL_EXCHANGE, MessageNames.SECKILL_ORDER_RESULT_ROUTING_KEY, requestId, payload, null);
     }
@@ -123,6 +149,11 @@ public class ReliableMessagePublisher {
     public ReliableMessage publishOrderCloseDelay(String orderSn, long delay, TimeUnit unit) {
         long delayMillis = Math.max(1, unit.toMillis(delay));
         return publish(MessageNames.MALL_DELAY_EXCHANGE, MessageNames.ORDER_CLOSE_DELAY_ROUTING_KEY, orderSn, orderSn, delayMillis);
+    }
+
+    public ReliableMessage enqueueOrderCloseDelay(String orderSn, long delay, TimeUnit unit) {
+        long delayMillis = Math.max(1, unit.toMillis(delay));
+        return enqueue(MessageNames.MALL_DELAY_EXCHANGE, MessageNames.ORDER_CLOSE_DELAY_ROUTING_KEY, orderSn, orderSn, delayMillis);
     }
 
     public void resend(ReliableMessage message) {
@@ -263,6 +294,14 @@ public class ReliableMessagePublisher {
                 .register(meterRegistry);
     }
 
+    private String stableSeckillOrderCreateMessageId(SeckillOrderCreateOutbox outbox) {
+        String raw = MessageNames.SECKILL_ORDER_CREATE_ROUTING_KEY + "|" + outbox.bucketShardKey() + "|" + outbox.requestId();
+        return UUID.nameUUIDFromBytes(raw.getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
     private record MessageRouteRef(String messageId, Long bucketShardKey) {
+    }
+
+    public record SeckillOrderCreateOutbox(String requestId, String payload, Long bucketShardKey) {
     }
 }

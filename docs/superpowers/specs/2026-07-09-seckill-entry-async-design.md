@@ -1,4 +1,4 @@
-# 秒杀入口异步化与库存事实闭合设计
+﻿# 秒杀入口异步化与库存事实闭合设计
 
 日期：2026-07-09
 
@@ -13,7 +13,7 @@ stage3c 压测显示，当前提交入口链路偏重。提交接口同步承担
 ## 设计目标
 
 - 降低提交入口同步写入和事务负担。
-- 去掉 `seckill_reservation_guard` 的入口同步写。
+- 去掉 `seckill_stock_snapshot` 的入口同步写。
 - 保留 Redis 快速挡重，减少 DB 冲突压力。
 - 保留 `seckill_stock_snapshot.request_id` 唯一键，兜底同请求幂等。
 - 保留 `seckill_stock_snapshot` 的 active user 唯一约束，兜底 Redis buyer key 失效后的一人一单。
@@ -23,7 +23,7 @@ stage3c 压测显示，当前提交入口链路偏重。提交接口同步承担
 
 ## 非目标
 
-- 不把库存事实完全迁移到 Redis。
+- 不把库存事实迁移到 Redis。
 - 不做纯 Redis 预扣再全量异步落库。
 - 不取消 DB 层一人一单兜底。
 - 不让提交接口等待订单服务创建订单。
@@ -144,7 +144,7 @@ uk_snapshot_active_user(activity_id, active_key)
 
 - Redis buyer key 是快挡，不是事实。
 - Redis 过期、重启或误删后，DB 仍可保证一人一单。
-- 该约束复用本来必须写的 `snapshot`，不再额外写 `seckill_reservation_guard`。
+- 该约束复用本来必须写的 `snapshot`，不再额外写 `seckill_stock_snapshot`。
 
 ## 事务 2：写扣减单据和库存实例
 
@@ -334,7 +334,7 @@ seckill_stock_snapshot(created_at)
 
 入口减少：
 
-- 不再写 `seckill_reservation_guard`。
+- 不再写 `seckill_stock_snapshot`。
 - 不在入口生成订单 outbox。
 - 不在入口等待订单服务。
 - 不在成功路径更新 `snapshot` 状态。
@@ -403,7 +403,7 @@ seckill_stock_snapshot(created_at)
 
 1. 校验并补齐 DB 约束和索引。
 2. 保留 `snapshot` active user 唯一约束，明确冲突处理。
-3. 从入口成功路径移除 `seckill_reservation_guard` 同步写。
+3. 从入口成功路径移除 `seckill_stock_snapshot` 同步写。
 4. 实现 Redis `req` 与 `buyer` 双 key。
 5. 调整入口为事务 1 写 snapshot、事务 2 写 change_log 和 bucket update。
 6. 确保事务 2 不更新 `snapshot` 成功状态。
@@ -439,8 +439,9 @@ seckill_stock_snapshot(created_at)
 已检查：
 
 - 设计明确保留 `snapshot` active user 一人一单唯一约束。
-- 设计明确移除入口同步写 `seckill_reservation_guard`。
+- 设计明确移除入口同步写 `seckill_stock_snapshot`。
 - 设计明确 `snapshot` 不是最终成功状态，最终状态由 `seckill_result` 提供。
 - 设计明确事务 2 不更新 `snapshot`，库存扣减事实由 `change_log` 表示。
 - 设计明确后台主流程以 `change_log.status` 游标推进，不依赖大范围 join。
 - 没有保留未完成占位项。
+

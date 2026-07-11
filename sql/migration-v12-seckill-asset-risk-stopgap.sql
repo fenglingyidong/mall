@@ -53,29 +53,6 @@ BEGIN
 END//
 DELIMITER ;
 
-CREATE TABLE IF NOT EXISTS seckill_reservation_guard (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    reservation_id VARCHAR(64) NOT NULL,
-    request_id VARCHAR(64) NOT NULL,
-    activity_id BIGINT NOT NULL,
-    sku_id BIGINT NOT NULL,
-    user_id BIGINT NOT NULL,
-    guard_shard_key BIGINT NOT NULL,
-    active_key VARCHAR(128),
-    bucket_id BIGINT,
-    bucket_no INT,
-    bucket_shard_key BIGINT,
-    status VARCHAR(32) NOT NULL,
-    fail_reason VARCHAR(255),
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_guard_reservation (reservation_id),
-    UNIQUE KEY uk_guard_request (request_id),
-    UNIQUE KEY uk_guard_activity_active (activity_id, active_key),
-    KEY idx_guard_status_updated (status, updated_at),
-    KEY idx_guard_bucket_shard (bucket_shard_key, status)
-);
-
 CREATE TABLE IF NOT EXISTS seckill_result_retry (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     message_id VARCHAR(128) NOT NULL,

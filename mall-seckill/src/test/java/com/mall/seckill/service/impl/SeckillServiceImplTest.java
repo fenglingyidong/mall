@@ -77,7 +77,7 @@ class SeckillServiceImplTest {
     }
 
     @Test
-    void asyncEntrySubmitShouldRegisterSnapshotAndDeductionFactWithoutReservationGuardOrOutbox() {
+    void asyncEntrySubmitShouldRegisterSnapshotAndDeductionFactWithoutOrderOutbox() {
         SeckillServiceImpl service = newAsyncEntryService();
         SeckillActivity activity = activeActivity();
         SeckillSku sku = sku();
@@ -124,9 +124,9 @@ class SeckillServiceImplTest {
                 .thenReturn(StockDeductionResult.success(null));
 
         UserContext.set(new UserInfo(101L, "u101"));
-        SeckillSubmitResponse first = service.submit(1L, 1001L);
+        SeckillSubmitResponse first = service.submit(1L, 1001L, null);
         UserContext.set(new UserInfo(102L, "u102"));
-        SeckillSubmitResponse second = service.submit(1L, 1001L);
+        SeckillSubmitResponse second = service.submit(1L, 1001L, null);
 
         assertThat(first.status()).isEqualTo("PROCESSING");
         assertThat(second.status()).isEqualTo("PROCESSING");

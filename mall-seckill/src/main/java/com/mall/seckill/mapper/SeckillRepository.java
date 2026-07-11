@@ -29,8 +29,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -569,6 +571,35 @@ public class SeckillRepository {
         return snapshot == null ? null : toStockSnapshot(snapshot);
     }
 
+    public Map<String, StockSnapshot> findStockSnapshots(List<String> requestIds, Long bucketShardKey) {
+        if (requestIds == null || requestIds.isEmpty() || bucketShardKey == null) {
+            return Map.of();
+        }
+        return snapshotMapper.selectByRequestIdsAndShard(requestIds, bucketShardKey).stream()
+                .collect(Collectors.toMap(
+                        SeckillStockSnapshotEntity::getRequestId,
+                        this::toStockSnapshot,
+                        (left, right) -> left,
+                        LinkedHashMap::new));
+    }
+
+    public Map<ActivitySkuKey, SeckillSku> findSkusByActivityAndSkuIds(Map<Long, Set<Long>> activitySkuIds) {
+        if (activitySkuIds == null || activitySkuIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<ActivitySkuKey, SeckillSku> result = new LinkedHashMap<>();
+        for (Map.Entry<Long, Set<Long>> entry : activitySkuIds.entrySet()) {
+            Long activityId = entry.getKey();
+            Set<Long> skuIds = entry.getValue();
+            if (activityId == null || skuIds == null || skuIds.isEmpty()) {
+                continue;
+            }
+            skuMapper.selectByActivityIdAndSkuIds(activityId, List.copyOf(skuIds))
+                    .forEach(entity -> result.put(new ActivitySkuKey(entity.getActivityId(), entity.getSkuId()), toDomain(entity)));
+        }
+        return result;
+    }
+
     public void saveResult(SeckillResult result) {
         resultSaveTimer.record(() -> doSaveResult(result));
     }
@@ -694,5 +725,8 @@ public class SeckillRepository {
         CREATED,
         REQUEST_DUPLICATE,
         ACTIVE_DUPLICATE
+    }
+
+    public record ActivitySkuKey(Long activityId, Long skuId) {
     }
 }

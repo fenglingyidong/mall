@@ -73,7 +73,6 @@ rules:
       - ds_0.seckill_activity
       - ds_0.seckill_sku
       - ds_0.seckill_result
-      - ds_0.seckill_reservation_guard
       - ds_0.seckill_result_retry
     defaultDataSource: ds_0
 

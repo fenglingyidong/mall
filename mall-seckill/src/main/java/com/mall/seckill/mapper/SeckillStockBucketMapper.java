@@ -105,7 +105,7 @@ public interface SeckillStockBucketMapper extends BaseMapper<SeckillStockBucketE
                                  @Param("skuId") Long skuId,
                                  @Param("quantityDelta") Integer quantityDelta);
 
-    @Select("SELECT COALESCE(SUM(saleable_quantity), 0) AS stock, COALESCE(SUM(version), 0) AS version FROM seckill_stock_bucket WHERE activity_id = #{activityId} AND sku_id = #{skuId} AND bucket_type = 'BUCKET'")
-    StockVersion selectAggregateStockVersion(@Param("activityId") Long activityId,
-                                             @Param("skuId") Long skuId);
+    @Select("SELECT saleable_quantity AS stock, version FROM seckill_stock_bucket WHERE activity_id = #{activityId} AND sku_id = #{skuId} AND bucket_type = 'CENTER' AND bucket_no = 0 AND shard_key = 0")
+    StockVersion selectCenterStockVersion(@Param("activityId") Long activityId,
+                                          @Param("skuId") Long skuId);
 }

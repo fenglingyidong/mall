@@ -53,12 +53,50 @@ public interface SeckillStockChangeLogMapper extends BaseMapper<SeckillStockChan
                            @Param("nextStatus") String nextStatus,
                            @Param("claimedAt") LocalDateTime claimedAt);
 
+    @Update({
+            "<script>",
+            "UPDATE seckill_stock_change_log",
+            "SET status = 'OUTBOXING', outbox_claim_token = #{claimToken}, outbox_claimed_at = #{claimedAt}, updated_at = #{claimedAt}",
+            "WHERE bucket_shard_key = #{bucketShardKey}",
+            "AND status = 'NEW'",
+            "AND id IN",
+            "<foreach collection='ids' item='id' open='(' separator=',' close=')'>",
+            "#{id}",
+            "</foreach>",
+            "</script>"
+    })
+    int claimStatusByIdsAndShard(@Param("ids") List<Long> ids,
+                                 @Param("bucketShardKey") Long bucketShardKey,
+                                 @Param("claimToken") String claimToken,
+                                 @Param("claimedAt") LocalDateTime claimedAt);
+
+    @Select("SELECT * FROM seckill_stock_change_log WHERE bucket_shard_key = #{bucketShardKey} AND outbox_claim_token = #{claimToken} ORDER BY id")
+    List<SeckillStockChangeLogEntity> selectClaimedByTokenAndShard(@Param("bucketShardKey") Long bucketShardKey,
+                                                                   @Param("claimToken") String claimToken);
+
     @Update("UPDATE seckill_stock_change_log SET status = #{nextStatus}, updated_at = NOW() WHERE id = #{id} AND bucket_shard_key = #{bucketShardKey} AND status = #{expectedStatus} AND updated_at = #{claimedAt}")
     int updateStatusByShardIfClaimed(@Param("id") Long id,
                                      @Param("bucketShardKey") Long bucketShardKey,
                                      @Param("expectedStatus") String expectedStatus,
                                      @Param("nextStatus") String nextStatus,
                                      @Param("claimedAt") LocalDateTime claimedAt);
+
+    @Update({
+            "<script>",
+            "UPDATE seckill_stock_change_log",
+            "SET status = #{nextStatus}, outbox_claim_token = NULL, outbox_claimed_at = NULL, updated_at = NOW()",
+            "WHERE bucket_shard_key = #{bucketShardKey}",
+            "AND outbox_claim_token = #{claimToken}",
+            "AND id IN",
+            "<foreach collection='ids' item='id' open='(' separator=',' close=')'>",
+            "#{id}",
+            "</foreach>",
+            "</script>"
+    })
+    int updateStatusByIdsAndClaimToken(@Param("ids") List<Long> ids,
+                                       @Param("bucketShardKey") Long bucketShardKey,
+                                       @Param("claimToken") String claimToken,
+                                       @Param("nextStatus") String nextStatus);
 
     @Select("SELECT id, bucket_shard_key FROM seckill_stock_change_log WHERE status = #{status} AND updated_at < #{before} ORDER BY id LIMIT #{limit}")
     List<SeckillStockChangeLogEntity> selectStaleIdsByStatus(@Param("status") String status,
@@ -71,6 +109,10 @@ public interface SeckillStockChangeLogMapper extends BaseMapper<SeckillStockChan
                                 @Param("expectedStatus") String expectedStatus,
                                 @Param("nextStatus") String nextStatus,
                                 @Param("before") LocalDateTime before);
+
+    @Update("UPDATE seckill_stock_change_log SET status = 'NEW', outbox_claim_token = NULL, outbox_claimed_at = NULL, updated_at = NOW() WHERE bucket_shard_key = #{bucketShardKey} AND status = 'OUTBOXING' AND outbox_claimed_at < #{before}")
+    int resetStaleOutboxingByShard(@Param("bucketShardKey") Long bucketShardKey,
+                                   @Param("before") LocalDateTime before);
 
     @Update({
             "<script>",

@@ -37,6 +37,12 @@
       "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
       "computedHash": "4c4d2b6da48482c1a054aca0e09eafd61cdcbebe2bda10abd3f355bf5f6fc57c"
     },
+    "subagent-driven-development": {
+      "source": "jnmetacode/superpowers-zh",
+      "sourceType": "github",
+      "skillPath": "skills/subagent-driven-development/SKILL.md",
+      "computedHash": "ec2137a9c780473ffec52d08fa5836b01708a4a48b58efc83eac2eca5ece5140"
+    },
     "systematic-debugging": {
       "source": "jnmetacode/superpowers-zh",
       "sourceType": "github",
@@ -44,10 +50,10 @@
       "computedHash": "68b1cb7419ea46bfcef621a63a994dacb1559e1878803461d6699a70dbcaef83"
     },
     "writing-plans": {
-      "source": "obra/superpowers",
+      "source": "jnmetacode/superpowers-zh",
       "sourceType": "github",
       "skillPath": "skills/writing-plans/SKILL.md",
-      "computedHash": "b73b59d43c34c3fc225bfae419c458bb216af80df25fc0c545dfa7fd2a161722"
+      "computedHash": "43257b44a402a80382a3b662d4d97b0ae604beac623a6065ac06b3fb08508879"
     }
   }
 }

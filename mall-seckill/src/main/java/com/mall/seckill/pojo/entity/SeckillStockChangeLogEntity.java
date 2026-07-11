@@ -34,6 +34,10 @@ public class SeckillStockChangeLogEntity {
 
     private String status;
 
+    private String outboxClaimToken;
+
+    private LocalDateTime outboxClaimedAt;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;

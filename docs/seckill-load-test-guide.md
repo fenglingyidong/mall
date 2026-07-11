@@ -16,7 +16,7 @@
 入口链路当前行为：
 
 1. `POST /api/seckill/{activityId}/{skuId}` 返回 `PROCESSING`、`FAILED` 或已有结果。
-2. HTTP submit 不再同步写 `seckill_reservation_guard`。
+2. HTTP submit 不再执行旧同步资格路径。
 3. HTTP submit 不再同步创建 `seckill.order.create` outbox。
 4. submit 只登记 `seckill_stock_snapshot.REGISTERED`，扣业务桶库存，并写 `seckill_stock_change_log.DEDUCT/NEW`。
 5. `SeckillOrderOutboxFromChangeLogJob` 将 `change_log.NEW` 推进到 `OUTBOXING`、`OUTBOXED`，并生成 `seckill.order.create`。
@@ -230,7 +230,7 @@ rtk docker compose --profile stage3c-sharding up -d mysql tairstring rabbitmq oc
 
 如果不重建库，reset 必须至少清理：
 
-- OceanBase 两个物理库：`seckill_result`、`seckill_reservation_guard`、`seckill_result_retry`、`seckill_stock_snapshot`、`seckill_stock_change_log`、`seckill_stock_bucket`、`seckill_bucket_config`、秒杀侧 `mq_message`。
+- OceanBase 两个物理库：`seckill_result`、`seckill_result_retry`、`seckill_stock_snapshot`、`seckill_stock_change_log`、`seckill_stock_bucket`、`seckill_bucket_config`、秒杀侧 `mq_message`。
 - MySQL：`seckill_order`、订单相关 `order_info` / `order_item`、订单侧 `mq_message`、`consume_record`。
 - RabbitMQ：秒杀建单、结果、关单相关队列。
 - TairString / Redis：秒杀库存缓存和 entry guard key。
@@ -549,3 +549,19 @@ conclusion:
 - `通过`：提交无系统错误，异步状态可 drain，数量一致。
 - `不通过`：存在 HTTP 500、状态长期不闭合、数量不一致、超卖、队列不可 drain。
 - `仅入口通过`：submit 指标正常，但未完成全链路闭合验证。
+
+## 17. 2026-07-10 验证补充
+
+- 入口压测结果：
+  - 	arget/loadtest/stage3c-current/submit-20260710-184930.jtl
+  - 	arget/loadtest/stage3c-current/report-20260710-184930
+  - 18105 请求
+  - 约 301 req/s
+  - JMeter 采样错误  %
+- 同轮 RabbitMQ eady/unacked 已回落，但 OceanBase 两个分片仍出现大量：
+  - seckill_stock_snapshot.REGISTERED
+  - seckill_stock_change_log.NEW
+  - MySQL seckill_order_count=0
+- 直接根因是运行库缺少 sql/migration-v14-seckill-outbox-direct-drain.sql，mall-seckill 日志报 Unknown column 'outbox_claim_token'。
+- 已补执行 v14 到两个 OceanBase 分片，但在准备第二轮 clean rerun 时，scripts/loadtest/stage3c/reset-seckill-loadtest.ps1 的 Redis 批量删除又报 ilename extension too long。
+- 因此截至 2026-07-10，本分支最新运行态结论是：仅入口通过，不能宣称全链路闭合通过。

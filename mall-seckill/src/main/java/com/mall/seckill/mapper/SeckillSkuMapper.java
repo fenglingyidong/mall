@@ -8,6 +8,8 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.util.List;
+
 @Mapper
 public interface SeckillSkuMapper extends BaseMapper<SeckillSkuEntity> {
 
@@ -41,4 +43,17 @@ public interface SeckillSkuMapper extends BaseMapper<SeckillSkuEntity> {
 
     @Update("UPDATE seckill_sku SET stock = stock + #{quantity} WHERE activity_id = #{activityId} AND sku_id = #{skuId}")
     int releaseStock(@Param("activityId") Long activityId, @Param("skuId") Long skuId, @Param("quantity") Integer quantity);
+
+    @Select({
+            "<script>",
+            "SELECT * FROM seckill_sku",
+            "WHERE activity_id = #{activityId}",
+            "AND sku_id IN",
+            "<foreach collection='skuIds' item='skuId' open='(' separator=',' close=')'>",
+            "#{skuId}",
+            "</foreach>",
+            "</script>"
+    })
+    List<SeckillSkuEntity> selectByActivityIdAndSkuIds(@Param("activityId") Long activityId,
+                                                       @Param("skuIds") List<Long> skuIds);
 }

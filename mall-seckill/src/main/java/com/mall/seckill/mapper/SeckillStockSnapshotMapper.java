@@ -27,4 +27,17 @@ public interface SeckillStockSnapshotMapper extends BaseMapper<SeckillStockSnaps
     @Select("SELECT * FROM seckill_stock_snapshot WHERE status = 'REGISTERED' AND bucket_shard_key IS NOT NULL AND created_at < #{before} ORDER BY created_at, request_id LIMIT #{limit}")
     List<SeckillStockSnapshotEntity> findRegisteredBefore(@Param("before") LocalDateTime before,
                                                           @Param("limit") Integer limit);
+
+    @Select({
+            "<script>",
+            "SELECT * FROM seckill_stock_snapshot",
+            "WHERE bucket_shard_key = #{bucketShardKey}",
+            "AND request_id IN",
+            "<foreach collection='requestIds' item='requestId' open='(' separator=',' close=')'>",
+            "#{requestId}",
+            "</foreach>",
+            "</script>"
+    })
+    List<SeckillStockSnapshotEntity> selectByRequestIdsAndShard(@Param("requestIds") List<String> requestIds,
+                                                                @Param("bucketShardKey") Long bucketShardKey);
 }

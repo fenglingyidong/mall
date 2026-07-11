@@ -85,10 +85,12 @@ CREATE TABLE IF NOT EXISTS order_info (
     total_amount DECIMAL(10, 2) NOT NULL,
     source VARCHAR(32) NOT NULL,
     source_id VARCHAR(128),
+    pay_expire_at DATETIME NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_order_sn (order_sn),
-    UNIQUE KEY uk_order_source (source, source_id)
+    UNIQUE KEY uk_order_source (source, source_id),
+    KEY idx_order_source_status_expire (source, status, pay_expire_at)
 );
 
 CREATE TABLE IF NOT EXISTS order_item (
@@ -164,9 +166,12 @@ CREATE TABLE IF NOT EXISTS seckill_stock_change_log (
     quantity_delta INT NOT NULL,
     after_quantity INT NOT NULL,
     status VARCHAR(32) NOT NULL,
+    outbox_claim_token VARCHAR(36),
+    outbox_claimed_at DATETIME(3),
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     KEY idx_change_log_status (status, id),
+    KEY idx_change_log_shard_status_id (bucket_shard_key, status, id),
     KEY idx_change_log_request (request_id),
     KEY idx_change_log_bucket (bucket_id)
 );
@@ -202,29 +207,6 @@ CREATE TABLE IF NOT EXISTS seckill_stock_snapshot (
     UNIQUE KEY uk_snapshot_active_user (activity_id, active_key)
 );
 
-CREATE TABLE IF NOT EXISTS seckill_reservation_guard (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    reservation_id VARCHAR(64) NOT NULL,
-    request_id VARCHAR(64) NOT NULL,
-    activity_id BIGINT NOT NULL,
-    sku_id BIGINT NOT NULL,
-    user_id BIGINT NOT NULL,
-    guard_shard_key BIGINT NOT NULL,
-    active_key VARCHAR(128),
-    bucket_id BIGINT,
-    bucket_no INT,
-    bucket_shard_key BIGINT,
-    status VARCHAR(32) NOT NULL,
-    fail_reason VARCHAR(255),
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_guard_reservation (reservation_id),
-    UNIQUE KEY uk_guard_request (request_id),
-    UNIQUE KEY uk_guard_activity_active (activity_id, active_key),
-    KEY idx_guard_status_updated (status, updated_at),
-    KEY idx_guard_bucket_shard (bucket_shard_key, status)
-);
-
 CREATE TABLE IF NOT EXISTS seckill_order (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     reservation_id VARCHAR(64),
@@ -254,6 +236,7 @@ CREATE TABLE IF NOT EXISTS mq_message (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_message_id (message_id),
+    UNIQUE KEY uk_mq_message_bucket_route_business (bucket_shard_key, routing_key, business_key),
     KEY idx_mq_message_bucket_status (bucket_shard_key, status, updated_at),
     KEY idx_mq_message_status_updated (status, updated_at)
 );

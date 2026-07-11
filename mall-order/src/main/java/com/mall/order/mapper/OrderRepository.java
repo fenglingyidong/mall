@@ -115,6 +115,36 @@ public class OrderRepository {
                 entity.getBucketShardKey()));
     }
 
+    public List<OrderInfo> findExpiredSeckillCreatedOrders(Instant now, int limit) {
+        int safeLimit = Math.max(1, limit);
+        LocalDateTime expireAt = toLocalDateTime(now);
+        return orderInfoMapper.selectList(Wrappers.<OrderInfoEntity>lambdaQuery()
+                        .eq(OrderInfoEntity::getSource, "SECKILL")
+                        .eq(OrderInfoEntity::getStatus, OrderStatus.CREATED.name())
+                        .le(OrderInfoEntity::getPayExpireAt, expireAt)
+                        .orderByAsc(OrderInfoEntity::getPayExpireAt)
+                        .orderByAsc(OrderInfoEntity::getId)
+                        .last("LIMIT " + safeLimit))
+                .stream()
+                .map(entity -> toDomain(entity, findItems(entity.getOrderSn())))
+                .toList();
+    }
+
+    public Optional<OrderInfo> closeExpiredSeckillOrder(String orderSn, Instant now) {
+        LocalDateTime expireAt = toLocalDateTime(now);
+        int updated = orderInfoMapper.update(null, Wrappers.<OrderInfoEntity>lambdaUpdate()
+                .eq(OrderInfoEntity::getOrderSn, orderSn)
+                .eq(OrderInfoEntity::getSource, "SECKILL")
+                .eq(OrderInfoEntity::getStatus, OrderStatus.CREATED.name())
+                .le(OrderInfoEntity::getPayExpireAt, expireAt)
+                .set(OrderInfoEntity::getStatus, OrderStatus.CLOSED.name())
+                .set(OrderInfoEntity::getUpdatedAt, expireAt));
+        if (updated <= 0) {
+            return Optional.empty();
+        }
+        return Optional.of(require(orderSn));
+    }
+
     public OrderInfo transition(String orderSn, OrderStatus from, OrderStatus to) {
         orderInfoMapper.update(null, Wrappers.<OrderInfoEntity>lambdaUpdate()
                 .eq(OrderInfoEntity::getOrderSn, orderSn)
@@ -146,6 +176,7 @@ public class OrderRepository {
         entity.setTotalAmount(order.totalAmount());
         entity.setSource(order.source());
         entity.setSourceId(order.sourceId());
+        entity.setPayExpireAt(toLocalDateTime(order.payExpireAt()));
         entity.setCreatedAt(toLocalDateTime(order.createdAt()));
         entity.setUpdatedAt(toLocalDateTime(order.updatedAt()));
         return entity;
@@ -171,6 +202,7 @@ public class OrderRepository {
                 items,
                 entity.getSource(),
                 entity.getSourceId(),
+                toInstant(entity.getPayExpireAt()),
                 toInstant(entity.getCreatedAt()),
                 toInstant(entity.getUpdatedAt())
         );
@@ -181,11 +213,11 @@ public class OrderRepository {
     }
 
     private LocalDateTime toLocalDateTime(Instant value) {
-        return value == null ? LocalDateTime.now() : LocalDateTime.ofInstant(value, ZONE_ID);
+        return value == null ? null : LocalDateTime.ofInstant(value, ZONE_ID);
     }
 
     private Instant toInstant(LocalDateTime value) {
-        return value == null ? Instant.now() : value.atZone(ZONE_ID).toInstant();
+        return value == null ? null : value.atZone(ZONE_ID).toInstant();
     }
 
     public record SeckillReservationBinding(String reservationId,

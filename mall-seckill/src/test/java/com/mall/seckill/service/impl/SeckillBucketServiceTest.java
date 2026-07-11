@@ -10,12 +10,14 @@ import com.mall.seckill.pojo.entity.SeckillStockBucketEntity;
 import com.mall.seckill.pojo.entity.SeckillStockChangeLogEntity;
 import com.mall.seckill.pojo.entity.SeckillStockSnapshotEntity;
 import com.mall.seckill.pojo.vo.StockVersion;
+import com.mall.seckill.service.event.SeckillDeductCommittedEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -44,6 +46,9 @@ class SeckillBucketServiceTest {
     @Mock
     private SeckillBucketAvailabilityCoordinator availabilityCoordinator;
 
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+
     private SeckillProperties properties;
     private SeckillBucketService service;
 
@@ -57,8 +62,28 @@ class SeckillBucketServiceTest {
                 changeLogMapper,
                 (SeckillBucketTransferService) null,
                 properties,
-                availabilityCoordinator);
-}
+                availabilityCoordinator,
+                eventPublisher);
+    }
+
+    @Test
+    void shouldReadCenterBucketStockVersion() {
+        StockVersion center = new StockVersion(12, 34L);
+        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(center);
+
+        StockVersion result = service.aggregateStockVersion(1L, 1001L);
+
+        assertThat(result).isEqualTo(center);
+    }
+
+    @Test
+    void shouldReturnZeroStockVersionWhenCenterBucketMissing() {
+        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(null);
+
+        StockVersion result = service.aggregateStockVersion(1L, 1001L);
+
+        assertThat(result).isEqualTo(new StockVersion(0, 0L));
+    }
     @Test
     void shouldSelectActiveBucketFromSurvivorList() {
         SeckillBucketConfigEntity config = config("3");
@@ -87,7 +112,7 @@ class SeckillBucketServiceTest {
         SeckillBucketService.SelectedBucket selected = new SeckillBucketService.SelectedBucket(99L, 3, 7L, 1L);
         StockVersion aggregate = new StockVersion(8, 4L);
         when(bucketMapper.deductSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(1);
-        when(bucketMapper.selectAggregateStockVersion(1L, 1001L)).thenReturn(aggregate);
+        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
 
         SeckillBucketService.BucketMutationResult result = service.deduct(selected, "r1", 1L, 1001L, 1);
 
@@ -100,6 +125,10 @@ class SeckillBucketServiceTest {
         assertThat(changeCaptor.getValue().getBucketNo()).isEqualTo(3);
         assertThat(changeCaptor.getValue().getBucketShardKey()).isEqualTo(3L);
         assertThat(changeCaptor.getValue().getAfterQuantity()).isEqualTo(SeckillBucketService.AFTER_QUANTITY_UNKNOWN);
+        ArgumentCaptor<SeckillDeductCommittedEvent> eventCaptor = ArgumentCaptor.forClass(SeckillDeductCommittedEvent.class);
+        verify(eventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().requestId()).isEqualTo("r1");
+        assertThat(eventCaptor.getValue().bucketShardKey()).isEqualTo(3L);
         verify(bucketMapper, never()).selectByIdAndShardKey(99L, 3L);
         verify(bucketMapper, never()).markEmptyIfNoSaleableByShard(99L, 3L);
         verify(configMapper, never()).removeSurvivorBucket(1L, 1001L, 3);
@@ -117,7 +146,7 @@ class SeckillBucketServiceTest {
         when(configMapper.selectEnabled(1L, 1001L)).thenReturn(config("4"));
         when(bucketMapper.selectActiveBucketByShard(1L, 1001L, 4, 4L)).thenReturn(nextBucket);
         when(bucketMapper.deductSaleableAndIncreaseVersionByShard(100L, 4L, 1)).thenReturn(1);
-        when(bucketMapper.selectAggregateStockVersion(1L, 1001L)).thenReturn(aggregate);
+        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
 
         SeckillBucketService.BucketMutationResult result = service.deduct(selected, "r1", 1L, 1001L, 1);
 
@@ -145,7 +174,7 @@ class SeckillBucketServiceTest {
         when(transferService.maxAttempts()).thenReturn(1);
         when(transferService.transfer("r1", 1L, 1001L, emptyBucket))
                 .thenReturn(new SeckillBucketTransferService.TransferResult(true, 8));
-        when(bucketMapper.selectAggregateStockVersion(1L, 1001L)).thenReturn(aggregate);
+        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
 
         SeckillBucketService.BucketMutationResult result = service.deduct(selected, "r1", 1L, 1001L, 1);
 
@@ -171,7 +200,7 @@ class SeckillBucketServiceTest {
         when(transferService.maxAttempts()).thenReturn(1);
         when(transferService.transfer("r1", 1L, 1001L, emptyBucket))
                 .thenReturn(new SeckillBucketTransferService.TransferResult(true, 8));
-        when(bucketMapper.selectAggregateStockVersion(1L, 1001L)).thenReturn(aggregate);
+        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
 
         SeckillBucketService.BucketMutationResult result = service.deductSelected(selected, "r1", 1L, 1001L, 1);
 
@@ -193,7 +222,7 @@ class SeckillBucketServiceTest {
 
         assertThat(result.stockVersion()).isNull();
         verify(bucketMapper, never()).selectByIdAndShardKey(99L, 3L);
-        verify(bucketMapper, never()).selectAggregateStockVersion(anyLong(), anyLong());
+        verify(bucketMapper, never()).selectCenterStockVersion(anyLong(), anyLong());
     }
 
     @Test
@@ -269,7 +298,7 @@ class SeckillBucketServiceTest {
         when(configMapper.selectEnabled(1L, 1001L)).thenReturn(config("4"));
         when(bucketMapper.selectActiveBucketByShard(1L, 1001L, 4, 4L)).thenReturn(nextBucket);
         when(bucketMapper.deductSaleableAndIncreaseVersionByShard(100L, 4L, 1)).thenReturn(1);
-        when(bucketMapper.selectAggregateStockVersion(1L, 1001L)).thenReturn(aggregate);
+        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
 
         SeckillBucketService.BucketMutationResult result = service.deduct(selected, "r1", 1L, 1001L, 1);
 
@@ -298,7 +327,7 @@ class SeckillBucketServiceTest {
         StockVersion aggregate = new StockVersion(9, 5L);
         when(bucketMapper.releaseSaleableAndIncreaseVersionByShard(99L, 3L, 1)).thenReturn(1);
         when(bucketMapper.selectByIdAndShardKey(99L, 3L)).thenReturn(bucket);
-        when(bucketMapper.selectAggregateStockVersion(1L, 1001L)).thenReturn(aggregate);
+        when(bucketMapper.selectCenterStockVersion(1L, 1001L)).thenReturn(aggregate);
 
         StockVersion result = service.release(snapshot);
 
@@ -308,6 +337,7 @@ class SeckillBucketServiceTest {
         assertThat(changeCaptor.getValue().getChangeType()).isEqualTo("RELEASE");
         assertThat(changeCaptor.getValue().getQuantityDelta()).isEqualTo(1);
         assertThat(changeCaptor.getValue().getBucketShardKey()).isEqualTo(3L);
+        verify(eventPublisher, never()).publishEvent(org.mockito.Mockito.any());
         verify(bucketMapper).updateStatus(99L, 3L, "ACTIVE");
         verify(availabilityCoordinator).signalPossiblyAvailable(1L, 1001L, 99L, 3, 3L);
         verify(configMapper, never()).updateSurvivorBuckets(1L, "3,4");

@@ -6,6 +6,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -130,5 +132,39 @@ class ReliableMessagePublisherTest {
                 any(MessagePostProcessor.class),
                 correlationCaptor.capture());
         assertThat(correlationCaptor.getValue().getId()).isEqualTo("3@" + message.messageId());
+    }
+
+    @Test
+    void enqueueOrderCloseDelayShouldSendOnlyAfterTransactionCommit() throws Exception {
+        when(repository.markDispatching(anyString(), nullable(Long.class))).thenReturn(true);
+        ReliableMessagePublisher publisher = new ReliableMessagePublisher(rabbitTemplate, repository, new SyncTaskExecutor());
+        TransactionSynchronizationManager.initSynchronization();
+
+        ReliableMessage message = publisher.enqueueOrderCloseDelay("S123", 300, java.util.concurrent.TimeUnit.SECONDS);
+
+        verify(repository).save(message);
+        verify(rabbitTemplate, never()).convertAndSend(
+                any(String.class),
+                any(String.class),
+                any(Object.class),
+                any(MessagePostProcessor.class),
+                any(CorrelationData.class));
+
+        List<TransactionSynchronization> synchronizations = TransactionSynchronizationManager.getSynchronizations();
+        assertThat(synchronizations).hasSize(1);
+        synchronizations.get(0).afterCommit();
+
+        ArgumentCaptor<MessagePostProcessor> postProcessorCaptor = ArgumentCaptor.forClass(MessagePostProcessor.class);
+        ArgumentCaptor<CorrelationData> correlationCaptor = ArgumentCaptor.forClass(CorrelationData.class);
+        verify(rabbitTemplate).convertAndSend(
+                eq(MessageNames.MALL_DELAY_EXCHANGE),
+                eq(MessageNames.ORDER_CLOSE_DELAY_ROUTING_KEY),
+                eq("S123"),
+                postProcessorCaptor.capture(),
+                correlationCaptor.capture());
+        Message rabbitMessage = new Message(new byte[0], new MessageProperties());
+        postProcessorCaptor.getValue().postProcessMessage(rabbitMessage);
+        assertThat(rabbitMessage.getMessageProperties().getExpiration()).isEqualTo("300000");
+        assertThat(correlationCaptor.getValue().getId()).isEqualTo(message.messageId());
     }
 }

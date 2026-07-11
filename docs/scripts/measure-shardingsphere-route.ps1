@@ -14,7 +14,6 @@ $targetTables = @(
     "seckill_stock_snapshot",
     "seckill_stock_change_log",
     "mq_message",
-    "seckill_reservation_guard",
     "seckill_result_retry"
 )
 

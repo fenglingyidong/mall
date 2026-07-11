@@ -11,8 +11,12 @@ import com.mall.order.pojo.dto.SeckillOrderRequest;
 import com.mall.order.pojo.entity.OrderInfo;
 import com.mall.order.service.OrderService;
 import com.rabbitmq.client.Channel;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -32,6 +36,24 @@ public class OrderMessageListener {
     @Autowired
     private ReliableMessageRepository messageRepository;
 
+    private final Timer seckillOrderCreateListenerTimer;
+
+    public OrderMessageListener() {
+        this(new SimpleMeterRegistry());
+    }
+
+    @Autowired
+    public OrderMessageListener(ObjectProvider<MeterRegistry> meterRegistry) {
+        this(meterRegistry.getIfAvailable(SimpleMeterRegistry::new));
+    }
+
+    private OrderMessageListener(MeterRegistry meterRegistry) {
+        MeterRegistry registry = meterRegistry == null ? new SimpleMeterRegistry() : meterRegistry;
+        this.seckillOrderCreateListenerTimer = Timer.builder("mall.order.seckill.create.listener")
+                .description("Latency from receiving seckill create message to RabbitMQ ack or nack")
+                .register(registry);
+    }
+
     @RabbitListener(
             queues = MessageNames.ORDER_CLOSE_QUEUE,
             containerFactory = "orderCloseRabbitListenerContainerFactory")
@@ -50,6 +72,7 @@ public class OrderMessageListener {
             queues = MessageNames.SECKILL_ORDER_CREATE_QUEUE,
             containerFactory = "seckillOrderCreateRabbitListenerContainerFactory")
     public void onSeckillOrderCreate(String payload, Message message, Channel channel) throws IOException {
+        Timer.Sample sample = Timer.start();
         long deliveryTag = message.getMessageProperties().getDeliveryTag();
         SeckillOrderRequest request = null;
         Long bucketShardKey = bucketShardKeyHeader(message);
@@ -71,6 +94,8 @@ public class OrderMessageListener {
                         exception.getMessage()));
             }
             channel.basicNack(deliveryTag, false, false);
+        } finally {
+            sample.stop(seckillOrderCreateListenerTimer);
         }
     }
 

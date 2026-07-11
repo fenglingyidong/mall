@@ -8,14 +8,16 @@ import org.springframework.stereotype.Component;
 @ConditionalOnProperty(prefix = "mall.seckill.order-outbox", name = "enabled", havingValue = "true")
 public class SeckillOrderOutboxFromChangeLogJob {
 
-    private final SeckillOrderOutboxFromChangeLogService service;
+    private final SeckillOrderOutboxCoordinator coordinator;
 
-    public SeckillOrderOutboxFromChangeLogJob(SeckillOrderOutboxFromChangeLogService service) {
-        this.service = service;
+    public SeckillOrderOutboxFromChangeLogJob(SeckillOrderOutboxCoordinator coordinator) {
+        this.coordinator = coordinator;
     }
 
-    @Scheduled(fixedDelayString = "${mall.seckill.order-outbox.fixed-delay:1000}")
+    @Scheduled(
+            fixedDelayString = "${mall.seckill.order-outbox.recovery-fixed-delay:1000}",
+            scheduler = "seckillOutboxRecoveryScheduler")
     public void drain() {
-        service.drainOnce();
+        coordinator.recoverConfiguredShards();
     }
 }

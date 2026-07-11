@@ -11,11 +11,13 @@ import com.mall.seckill.pojo.entity.SeckillStockBucketEntity;
 import com.mall.seckill.pojo.entity.SeckillStockChangeLogEntity;
 import com.mall.seckill.pojo.entity.SeckillStockSnapshotEntity;
 import com.mall.seckill.pojo.vo.StockVersion;
+import com.mall.seckill.service.event.SeckillDeductCommittedEvent;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
@@ -49,6 +51,7 @@ public class SeckillBucketService {
     private final LongSupplier currentTimeMillis;
     private final MeterRegistry meterRegistry;
     private final SeckillBucketAvailabilityCoordinator availabilityCoordinator;
+    private final ApplicationEventPublisher eventPublisher;
     private final Timer routeTimer;
     private final Timer dbDeductTimer;
     private final Timer changeLogInsertTimer;
@@ -69,6 +72,7 @@ public class SeckillBucketService {
                                 ObjectProvider<SeckillBucketTransferService> transferService,
                                 ObjectProvider<SeckillBucketShardRouter> shardRouter,
                                 ObjectProvider<SeckillBucketAvailabilityCoordinator> availabilityCoordinator,
+                                ObjectProvider<ApplicationEventPublisher> eventPublisher,
                                 SeckillProperties properties,
                                 MeterRegistry meterRegistry) {
         this(configMapper,
@@ -79,7 +83,8 @@ public class SeckillBucketService {
                 meterRegistry,
                 System::currentTimeMillis,
                 shardRouter.getIfAvailable(),
-                availabilityCoordinator.getIfAvailable());
+                availabilityCoordinator.getIfAvailable(),
+                eventPublisher.getIfAvailable());
     }
 
     SeckillBucketService(SeckillBucketConfigMapper configMapper,
@@ -105,6 +110,17 @@ public class SeckillBucketService {
                          SeckillBucketAvailabilityCoordinator availabilityCoordinator) {
         this(configMapper, bucketMapper, changeLogMapper, transferService, properties,
                 new SimpleMeterRegistry(), System::currentTimeMillis, null, availabilityCoordinator);
+    }
+
+    SeckillBucketService(SeckillBucketConfigMapper configMapper,
+                         SeckillStockBucketMapper bucketMapper,
+                         SeckillStockChangeLogMapper changeLogMapper,
+                         SeckillBucketTransferService transferService,
+                         SeckillProperties properties,
+                         SeckillBucketAvailabilityCoordinator availabilityCoordinator,
+                         ApplicationEventPublisher eventPublisher) {
+        this(configMapper, bucketMapper, changeLogMapper, transferService, properties,
+                new SimpleMeterRegistry(), System::currentTimeMillis, null, availabilityCoordinator, eventPublisher);
     }
 
     SeckillBucketService(SeckillBucketConfigMapper configMapper,
@@ -154,8 +170,22 @@ public class SeckillBucketService {
                          SeckillProperties properties,
                          MeterRegistry meterRegistry,
                          LongSupplier currentTimeMillis,
-                         SeckillBucketShardRouter shardRouter,
+                          SeckillBucketShardRouter shardRouter,
                          SeckillBucketAvailabilityCoordinator availabilityCoordinator) {
+        this(configMapper, bucketMapper, changeLogMapper, transferService, properties, meterRegistry, currentTimeMillis,
+                shardRouter, availabilityCoordinator, null);
+    }
+
+    SeckillBucketService(SeckillBucketConfigMapper configMapper,
+                         SeckillStockBucketMapper bucketMapper,
+                         SeckillStockChangeLogMapper changeLogMapper,
+                         SeckillBucketTransferService transferService,
+                         SeckillProperties properties,
+                         MeterRegistry meterRegistry,
+                         LongSupplier currentTimeMillis,
+                         SeckillBucketShardRouter shardRouter,
+                         SeckillBucketAvailabilityCoordinator availabilityCoordinator,
+                         ApplicationEventPublisher eventPublisher) {
         SeckillProperties effectiveProperties = properties == null ? new SeckillProperties() : properties;
         this.configMapper = configMapper;
         this.bucketMapper = bucketMapper;
@@ -166,6 +196,7 @@ public class SeckillBucketService {
         this.currentTimeMillis = currentTimeMillis == null ? System::currentTimeMillis : currentTimeMillis;
         this.meterRegistry = meterRegistry == null ? new SimpleMeterRegistry() : meterRegistry;
         this.availabilityCoordinator = availabilityCoordinator;
+        this.eventPublisher = eventPublisher;
         this.routeTimer = timer("seckill.submit.record.bucket.route", "Official submit bucket route and select latency");
         this.dbDeductTimer = timer("seckill.submit.record.bucket.db.deduct", "Official submit bucket conditional deduct SQL latency");
         this.changeLogInsertTimer = timer("seckill.submit.record.bucket.change-log.insert", "Official submit bucket stock change log insert latency");
@@ -296,7 +327,15 @@ public class SeckillBucketService {
                 -quantity,
                 AFTER_QUANTITY_UNKNOWN);
         changeLogInsertTimer.record(() -> changeLogMapper.insert(changeLog));
+        publishDeductCommitted(requestId, selectedBucket.bucketShardKey());
         return new BucketMutationResult(hotPathStockVersion(activityId, skuId), changeLog.getId(), selectedBucket);
+    }
+
+    private void publishDeductCommitted(String requestId, Long bucketShardKey) {
+        if (eventPublisher == null || requestId == null || requestId.isBlank() || bucketShardKey == null) {
+            return;
+        }
+        eventPublisher.publishEvent(new SeckillDeductCommittedEvent(requestId, bucketShardKey));
     }
 
     private SeckillStockBucketEntity markBucketEmptyIfExhausted(Long activityId,
@@ -467,7 +506,7 @@ public class SeckillBucketService {
     }
 
     public StockVersion aggregateStockVersion(Long activityId, Long skuId) {
-        StockVersion stockVersion = bucketMapper.selectAggregateStockVersion(activityId, skuId);
+        StockVersion stockVersion = bucketMapper.selectCenterStockVersion(activityId, skuId);
         return stockVersion == null ? new StockVersion(0, 0L) : stockVersion;
     }
 
@@ -475,6 +514,7 @@ public class SeckillBucketService {
         if (!properties.getBucket().isHotPathAggregateRead()) {
             return null;
         }
+        // Read the CENTER ledger row instead of fan-out SUM across sharded BUCKET rows.
         return stockVersionTimer.record(() -> aggregateStockVersion(activityId, skuId));
     }
 

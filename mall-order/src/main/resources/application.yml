@@ -26,6 +26,8 @@ spring:
     username: root
     password: root
     driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 40
   rabbitmq:
     host: localhost
     port: 5672
@@ -41,6 +43,10 @@ spring:
 mall:
   order:
     close-delay-seconds: 300
+    expired-close:
+      enabled: true
+      fixed-delay: 5000
+      batch-size: 500
   message:
     dispatch:
       core-pool-size: 8

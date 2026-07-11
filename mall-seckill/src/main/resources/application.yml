@@ -8,6 +8,8 @@ server:
     max-connections: 10000
 
 spring:
+  profiles:
+    active: stage3c-sharding
   application:
     name: mall-seckill
   cloud:
@@ -52,12 +54,6 @@ mall:
         enabled: false
         fixed-delay: 60000
         limit: 1000
-    reservation-guard:
-      enabled: false
-      processing-probe-after-seconds: 30
-      safe-release-after-seconds: 300
-      repair-batch-size: 100
-      repair-fixed-delay: 60000
     entry-guard:
       enabled: false
       key-prefix: "seckill:entry:"
@@ -66,7 +62,15 @@ mall:
     order-outbox:
       enabled: false
       fixed-delay: 1000
-      batch-size: 500
+      batch-size: 200
+      worker-core-pool-size: 4
+      worker-max-pool-size: 8
+      worker-queue-capacity: 64
+      max-batches-per-run: 5
+      claim-timeout-seconds: 5
+      recovery-fixed-delay: 1000
+      message-retry-fixed-delay: 1000
+      message-dispatch-timeout-seconds: 5
     snapshot-repair:
       enabled: false
       fixed-delay: 1000

@@ -24,7 +24,7 @@ MySQL 正式订单
 订单结果消息回写 OceanBase
 ```
 
-`mall-seckill` 的 HTTP 提交入口不再同步写 `seckill_reservation_guard`，也不再同步创建 `seckill.order.create` outbox。提交线程只完成快速挡重、snapshot 登记、业务桶扣减和 change_log 扣减事实记录，然后返回 `PROCESSING`。
+`mall-seckill` 的 HTTP 提交入口不再维护旧同步资格路径，也不再同步创建 `seckill.order.create` outbox。提交线程只完成快速挡重、snapshot 登记、业务桶扣减和 change_log 扣减事实记录，然后返回 `PROCESSING`。
 
 正式建单仍由 `mall-order` 异步完成。订单结果消息回到 `mall-seckill` 后，`SeckillResultMessageListener` 以 `seckill_stock_snapshot` 和 `seckill_stock_change_log` 为事实源关闭 `seckill_result`。
 
@@ -36,7 +36,6 @@ MySQL 正式订单
 mall.seckill.bucket.enabled=true
 mall.seckill.stock-cache.enabled=true
 mall.seckill.stock-cache.repair.enabled=true
-mall.seckill.reservation-guard.enabled=false
 mall.seckill.entry-guard.enabled=true
 mall.seckill.order-outbox.enabled=true
 mall.seckill.snapshot-repair.enabled=true
@@ -50,7 +49,6 @@ mall.seckill.bucket.reconcile.enabled=false
 
 含义：
 
-- `reservation-guard.enabled=false`：提交入口不再依赖 `ReservationGuardRepository` 作为同步 reservation guard。
 - `entry-guard.enabled=true`：入口使用 Redis request/buyer key 做快速幂等和同买家挡重。
 - `order-outbox.enabled=true`：`seckill.order.create` 消息由后台 worker 根据库存扣减事实生成。
 - `snapshot-repair.enabled=true`：无扣减事实的 stale `REGISTERED` snapshot 会被修复为失败结果。
@@ -59,7 +57,7 @@ mall.seckill.bucket.reconcile.enabled=false
 
 入口异步化后的边界是：
 
-- 提交入口不再同步写 `seckill_reservation_guard`。
+- 提交入口不再执行旧同步资格路径。
 - 提交入口不再同步调用 `ReliableMessagePublisher.enqueueSeckillOrderCreate`。
 - 入口只做 Redis 快速挡重、`seckill_stock_snapshot` 请求登记、`seckill_stock_change_log` 库存扣减事实和 `seckill_stock_bucket` 条件扣减。
 - HTTP 返回 `PROCESSING`，最终成功只以 `seckill_result.SUCCESS` 为准。
@@ -164,7 +162,7 @@ NEW -> OUTBOXING -> OUTBOXED
 
 ## 9. 当前关键结论
 
-- 旧同步 reservation guard / 同步 order outbox submit 路径已从 `SeckillServiceImpl` 去除。
+- 旧同步资格路径 / 同步 order outbox submit 路径已从 `SeckillServiceImpl` 去除。
 - async entry guard 未启用时直接拒绝提交，不回退旧同步路径。
 - 售罄快速失败仍保留，并且在失败时释放 buyer key。
 - order outbox worker 是生成 `seckill.order.create` 的唯一当前生产路径。
@@ -182,3 +180,12 @@ NEW -> OUTBOXING -> OUTBOXED
 | result listener | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillResultMessageListener.java` | 订单结果闭环 |
 | snapshot repair | `mall-seckill/src/main/java/com/mall/seckill/service/impl/SeckillSnapshotFactRepairJob.java` | stale REGISTERED 修复 |
 | reliable message | `mall-message/src/main/java/com/mall/message/MessageCompensationJob.java` | shard-aware 补偿 |
+
+## 11. 2026-07-10 验证补充
+
+- 当前 outbox 主路径已经切到 `AFTER_COMMIT -> SeckillDeductCommittedListener -> SeckillOrderOutboxCoordinator -> drainShard`。
+- `SeckillOrderOutboxFromChangeLogJob` 现在只负责 stale `OUTBOXING` 恢复 signal，不再直接处理业务 SQL。
+- 已新增秒杀专用 `SeckillOrderCreateMessageCompensationJob`，每秒只补偿 `seckill.order.create` 的 `NEW/FAILED`。
+- 2026-07-10 本地入口压测已通过：`target/loadtest/stage3c-current/submit-20260710-184930.jtl`，`18105` 请求，约 `301 req/s`，JMeter 错误 `0%`。
+- 同轮闭合未通过，根因不是入口回归，而是运行中的 OceanBase 分片库未执行 `migration-v14-seckill-outbox-direct-drain.sql`，导致 `mall-seckill` 日志报 `Unknown column 'outbox_claim_token'`。
+- 补执行 v14 后，又发现 `scripts/loadtest/stage3c/reset-seckill-loadtest.ps1` 在大量 Redis key 场景下会因 `redis-cli DEL` 参数过长失败，需先修 reset 脚本后再做迁移后的 clean rerun。

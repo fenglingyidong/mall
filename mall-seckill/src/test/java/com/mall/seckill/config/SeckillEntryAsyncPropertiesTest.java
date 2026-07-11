@@ -18,7 +18,15 @@ class SeckillEntryAsyncPropertiesTest {
 
         assertThat(properties.getOrderOutbox().isEnabled()).isFalse();
         assertThat(properties.getOrderOutbox().getFixedDelay()).isEqualTo(1000);
-        assertThat(properties.getOrderOutbox().getBatchSize()).isEqualTo(500);
+        assertThat(properties.getOrderOutbox().getBatchSize()).isEqualTo(200);
+        assertThat(properties.getOrderOutbox().getWorkerCorePoolSize()).isEqualTo(4);
+        assertThat(properties.getOrderOutbox().getWorkerMaxPoolSize()).isEqualTo(8);
+        assertThat(properties.getOrderOutbox().getWorkerQueueCapacity()).isEqualTo(64);
+        assertThat(properties.getOrderOutbox().getMaxBatchesPerRun()).isEqualTo(5);
+        assertThat(properties.getOrderOutbox().getClaimTimeoutSeconds()).isEqualTo(5);
+        assertThat(properties.getOrderOutbox().getRecoveryFixedDelay()).isEqualTo(1000);
+        assertThat(properties.getOrderOutbox().getMessageRetryFixedDelay()).isEqualTo(1000);
+        assertThat(properties.getOrderOutbox().getMessageDispatchTimeoutSeconds()).isEqualTo(5);
 
         assertThat(properties.getSnapshotRepair().isEnabled()).isFalse();
         assertThat(properties.getSnapshotRepair().getFixedDelay()).isEqualTo(1000);

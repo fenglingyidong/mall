@@ -35,18 +35,18 @@ Client
   -> 可选 Caffeine 本地热点门闸限制热点 SKU 并发
   -> 可选 Redisson 对同一用户同一活动 SKU 加提交锁
   -> Redis/TairString 版本缓存做售罄快速失败
-  -> reservation guard 用 requestId 幂等和 active_key 防重复购买
-  -> 选业务桶，扣减前把 bucket_shard_key 持久化到 guard
+  -> Redis 入口挡重处理 requestId 幂等和同买家并发提交
+  -> 选业务桶，扣减位置持久化到 snapshot/change_log
   -> OceanBase/ShardingSphere 按 bucket_shard_key 路由到业务桶分片
-  -> 同一事务写入 seckill_stock_snapshot(DEDUCTED)、扣减业务桶、写 change_log、写 seckill_result(PROCESSING)、写 mq_message(NEW)
-  -> mall-message afterCommit 发送秒杀下单消息，发送状态以 DISPATCHING CAS 收口
+  -> 写入 seckill_stock_snapshot(REGISTERED)、扣减业务桶、写 change_log(NEW)
+  -> 后台 outbox worker 根据 change_log 生成秒杀下单消息，发送状态以 DISPATCHING CAS 收口
   -> mall.seckill.order.create.queue
   -> Order 手动 ACK 消费消息并创建秒杀订单，不再二次扣商品库存
   -> Order 写入 order_info/order_item/seckill_order
   -> Order 发布秒杀结果消息
   -> mall.seckill.order.result.queue
   -> Seckill 手动 ACK 消费结果消息
-  -> SUCCESS: snapshot DEDUCTED -> CONFIRMED，guard -> CONFIRMED 且继续占用 active_key
+  -> SUCCESS: snapshot -> CONFIRMED
   -> FAILED: 只释放 DEDUCTED snapshot 并回补业务桶
   -> CANCELED/ORDER_CLOSED: 只释放 CONFIRMED snapshot 并回补业务桶
   -> 结果消费异常写 seckill_result_retry 延迟重试，超过次数进入 DLQ 状态
@@ -64,7 +64,7 @@ Client
 - `mall-product` 使用 OpenFeign 调用 `mall-review` 的评价摘要接口和 `mall-coupon` 的可领取优惠券接口，并用 `CompletableFuture` 并行聚合非核心展示信息；商品详情异步线程池通过 `TtlExecutors` 包装，避免异步任务丢失用户上下文。
 - `mall-order` 使用 OpenFeign 调用 `mall-product` 的商品详情、库存扣减、库存释放接口，以及 `mall-cart` 的选中购物车查询和清理接口；普通订单创建用 Seata TCC 协调商品库存 Try/Confirm/Cancel。
 - `mall-order` 的 Feign 客户端保留 fallback；商品详情可降级演示，库存扣减/释放降级为失败，避免商品服务不可用时误创建订单。
-- `mall-seckill` 使用 Sentinel `SphU.entry("seckill-submit")` 和 `FlowRuleManager` 配置 QPS 规则，超过阈值返回业务码 `429`；热点 SKU 的本地并发门闸当前由 `SeckillHotspotGuard + Caffeine` 管理。当前 Stage3C 分片压测 profile 默认关闭 Redisson 用户短锁，但开启 Redis/TairString 版本缓存、中心总账、请求触发调拨和后台自动调拨；最终重复购买强约束仍放在 `seckill_reservation_guard`，库存事实仍放在 OceanBase 分桶事务。
+- `mall-seckill` 使用 Sentinel `SphU.entry("seckill-submit")` 和 `FlowRuleManager` 配置 QPS 规则，超过阈值返回业务码 `429`；热点 SKU 的本地并发门闸当前由 `SeckillHotspotGuard + Caffeine` 管理。当前 Stage3C 分片压测 profile 默认关闭 Redisson 用户短锁，但开启 Redis/TairString 版本缓存、Redis 入口挡重、中心总账、请求触发调拨和后台自动调拨；库存事实放在 OceanBase 分桶事务。
 - Gateway 与订单、秒杀服务均配置 Sentinel Dashboard 地址 `localhost:8858`，便于后续在控制台观察资源和规则。
 
 ## 数据持久化
@@ -76,7 +76,7 @@ Client
 - `mall-coupon`：商品优惠券落到 `product_coupon`。
 - `mall-cart`：购物车数据落到 `cart_item`，Redis Hash `cart:{userId}` 只作为缓存层。
 - `mall-order`：订单主表、订单明细、秒杀订单绑定关系分别落到 `order_info`、`order_item`、`seckill_order`。
-- `mall-seckill`：秒杀活动、秒杀商品、资格 guard、分桶库存、扣减快照、库存变更日志、结果重试和异步查询结果分别落到 `seckill_activity`、`seckill_sku`、`seckill_reservation_guard`、`seckill_stock_bucket`、`seckill_stock_snapshot`、`seckill_stock_change_log`、`seckill_result_retry`、`seckill_result`。
+- `mall-seckill`：秒杀活动、秒杀商品、分桶库存、扣减快照、库存变更日志、结果重试和异步查询结果分别落到 `seckill_activity`、`seckill_sku`、`seckill_stock_bucket`、`seckill_stock_snapshot`、`seckill_stock_change_log`、`seckill_result_retry`、`seckill_result`。
 - `mall-message`：可靠消息和消费幂等分别落到 `mq_message`、`consume_record`。
 - `undo_log`、`tcc_fence_log`：为 Seata 事务和 TCC Fence 提供基础表；当前库存 TCC 主要使用 `tcc_fence_log` 处理空回滚、悬挂和二阶段幂等。
 

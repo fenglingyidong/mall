@@ -21,8 +21,8 @@ spring:
     driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
     url: jdbc:shardingsphere:classpath:shardingsphere-stage3c.yaml
     hikari:
-      maximum-pool-size: 80
-      minimum-idle: 20
+      maximum-pool-size: 160
+      minimum-idle: 80
   data:
     redis:
       port: 16381
@@ -36,12 +36,6 @@ mall:
       enabled: true
       repair:
         enabled: true
-    reservation-guard:
-      enabled: false
-      processing-probe-after-seconds: 30
-      safe-release-after-seconds: 300
-      repair-batch-size: 100
-      repair-fixed-delay: 60000
     entry-guard:
       enabled: true
       key-prefix: "seckill:entry:"
@@ -50,7 +44,15 @@ mall:
     order-outbox:
       enabled: true
       fixed-delay: 100
-      batch-size: 500
+      batch-size: 200
+      worker-core-pool-size: 4
+      worker-max-pool-size: 8
+      worker-queue-capacity: 64
+      max-batches-per-run: 5
+      claim-timeout-seconds: 5
+      recovery-fixed-delay: 1000
+      message-retry-fixed-delay: 1000
+      message-dispatch-timeout-seconds: 5
     snapshot-repair:
       enabled: true
       fixed-delay: 1000

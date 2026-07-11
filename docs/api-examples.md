@@ -42,7 +42,7 @@ docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf
 docker compose exec -T -e MYSQL_PWD=root mysql mysql --default-character-set=utf8mb4 -uroot mall -e "source /docker-entrypoint-initdb.d/migration-v12-seckill-asset-risk-stopgap.sql"
 ```
 
-迁移脚本会补齐 `mq_message`、`consume_record`、分桶库存、reservation guard、结果重试等结构，适合本地演示库升级。新库可以直接导入 `sql/schema.sql` 和 `sql/seed-demo-data.sql`。
+迁移脚本会补齐 `mq_message`、`consume_record`、分桶库存、结果重试等结构，适合本地演示库升级。新库可以直接导入 `sql/schema.sql` 和 `sql/seed-demo-data.sql`。
 
 如果创建订单或消息补偿任务报下面这类错误，说明当前库里的 `mq_message` 还是旧表结构，也执行同一个迁移脚本：
 

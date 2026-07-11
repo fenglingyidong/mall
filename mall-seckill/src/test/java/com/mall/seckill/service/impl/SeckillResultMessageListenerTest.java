@@ -6,7 +6,6 @@ import com.mall.message.ReliableMessageRepository;
 import com.mall.message.SeckillOrderResultMessage;
 import com.mall.seckill.cache.SeckillStockCache;
 import com.mall.seckill.config.SeckillProperties;
-import com.mall.seckill.mapper.ReservationGuardRepository;
 import com.mall.seckill.mapper.SeckillRepository;
 import com.mall.seckill.mapper.SeckillResultRetryRepository;
 import com.mall.seckill.pojo.vo.SeckillResult;
@@ -46,9 +45,6 @@ class SeckillResultMessageListenerTest {
 
     @Mock
     private Channel channel;
-
-    @Mock
-    private ReservationGuardRepository guardRepository;
 
     @Mock
     private SeckillResultRetryRepository retryRepository;
@@ -189,8 +185,6 @@ class SeckillResultMessageListenerTest {
                 eq(1),
                 anyList()))
                 .thenReturn(new SeckillResultRetryRepository.RetryDecision(false, 2, 0));
-        when(guardRepository.markFailedIfProcessing(eq("r1"), any(String.class))).thenReturn(true);
-
         listener.onSeckillOrderResult(
                 objectMapper.writeValueAsString(new SeckillOrderResultMessage("r1", "r1", "SUCCESS", "S1", "ok", 3L)),
                 message(),
@@ -201,14 +195,12 @@ class SeckillResultMessageListenerTest {
         assertThat(resultCaptor.getValue().requestId()).isEqualTo("r1");
         assertThat(resultCaptor.getValue().status()).isEqualTo("FAILED");
         assertThat(resultCaptor.getValue().message()).contains("Result retry exhausted");
-        verify(guardRepository).markFailedIfProcessing(eq("r1"), any(String.class));
-        verify(guardRepository, never()).markReleased(eq("r1"), any(String.class));
         verify(messageRepository).markConsumed("m1", 3L);
         verify(channel).basicAck(7L, false);
     }
 
     @Test
-    void shouldReleaseGuardWhenFailedResultRetryExhausted() throws Exception {
+    void shouldTerminalizeFailedResultWhenRetryExhausted() throws Exception {
         ObjectMapper objectMapper = new ObjectMapper();
         SeckillResultMessageListener listener = retryingListener(objectMapper);
         when(retryRepository.recordFailure(
@@ -232,7 +224,6 @@ class SeckillResultMessageListenerTest {
         assertThat(resultCaptor.getValue().requestId()).isEqualTo("r1");
         assertThat(resultCaptor.getValue().status()).isEqualTo("FAILED");
         assertThat(resultCaptor.getValue().message()).contains("Result retry exhausted");
-        verify(guardRepository).markReleased(eq("r1"), any(String.class));
         verify(messageRepository).markConsumed("m1", 3L);
         verify(channel).basicAck(7L, false);
     }
@@ -241,10 +232,8 @@ class SeckillResultMessageListenerTest {
         SeckillProperties properties = new SeckillProperties();
         properties.getResultRetry().setEnabled(true);
         properties.getResultRetry().setMaxAttempts(1);
-        ObjectProvider<ReservationGuardRepository> guardProvider = mock(ObjectProvider.class);
         ObjectProvider<SeckillResultRetryRepository> retryProvider = mock(ObjectProvider.class);
         ObjectProvider<ReliableMessagePublisher> publisherProvider = mock(ObjectProvider.class);
-        when(guardProvider.getIfAvailable()).thenReturn(guardRepository);
         when(retryProvider.getIfAvailable()).thenReturn(retryRepository);
         when(publisherProvider.getIfAvailable()).thenReturn(retryMessagePublisher);
         return new SeckillResultMessageListener(
@@ -252,7 +241,6 @@ class SeckillResultMessageListenerTest {
                 stockCache,
                 objectMapper,
                 messageRepository,
-                guardProvider,
                 retryProvider,
                 publisherProvider,
                 properties);
